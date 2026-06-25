@@ -42,10 +42,14 @@ if [[ ! -d "$SOURCE_DIR" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_PYTHON="/Users/rzheng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
-PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+DEFAULT_PYTHON="$ROOT_DIR/.venv/bin/python"
+PYTHON_BIN="${PYTHON_BIN:-}"
 
-if [[ ! -x "$PYTHON_BIN" ]]; then
+if [[ -z "$PYTHON_BIN" && -x "$DEFAULT_PYTHON" ]]; then
+  PYTHON_BIN="$DEFAULT_PYTHON"
+fi
+
+if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3)"
   else
@@ -64,7 +68,7 @@ echo "  dry-run file: $DRY_RUN_FILE"
 echo "  python:       $PYTHON_BIN"
 
 cd "$ROOT_DIR"
-PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m curator organize \
+"$PYTHON_BIN" -m curator organize \
   --mode migration \
   --transfer copy \
   --source "$SOURCE_DIR" \

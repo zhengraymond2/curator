@@ -15,16 +15,41 @@ See [docs/design.md](docs/design.md) for the current design doc.
 
 ## Development
 
+Create and activate the repo-local Python environment with:
+
+```sh
+source scripts/env
+```
+
+This creates `.venv/`, activates it, and installs Curator in editable mode from
+`pyproject.toml`. If pyenv is available, the script uses the pinned
+`.python-version`; otherwise it falls back to any compatible `python3` and keeps
+dependencies isolated inside `.venv/`.
+
+To use the pinned pyenv runtime explicitly:
+
+```sh
+pyenv install -s "$(cat .python-version)"
+source scripts/env
+```
+
+Optional overrides:
+
+```sh
+CURATOR_PYTHON=/path/to/python3 source scripts/env
+CURATOR_EXTRAS=raw source scripts/env
+```
+
 Run the CLI from the repo with:
 
 ```sh
-PYTHONPATH=src python3 -m curator --help
+python -m curator --help
 ```
 
 Run tests with:
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests
+python -m unittest discover -s tests
 ```
 
 Tests generate fake media only under:
@@ -55,33 +80,6 @@ DRY_RUN_FILE=DRYRUN3.txt ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
 LIBRARY_ROOT=/path/to/library ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
 PYTHON_BIN="$(which python3)" ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
 ```
-
-## Current Commands
-
-```sh
-curator ingest --help
-curator organize --help
-curator dedupe --help
-curator plan --help
-curator apply --help
-curator trash-report --help
-curator glacier-plan --help
-```
-
-During development, prefer the module form:
-
-```sh
-PYTHONPATH=src python3 -m curator ingest --source test/runtime/card --dest test/runtime/ssd
-PYTHONPATH=src python3 -m curator organize --mode migration --transfer copy --source test/runtime/source --library test/runtime/library
-PYTHONPATH=src python3 -m curator organize --mode migration --transfer copy --source test/runtime/source --library test/runtime/library --dry-mode
-PYTHONPATH=src python3 -m curator organize --mode migration --transfer copy --source test/runtime/source --library test/runtime/library --identify-places --dry-mode --dry-run-file DRYRUN2.txt
-PYTHONPATH=src python3 -m curator organize --mode migration --transfer copy --source test/runtime/source --library test/runtime/library --identify-places --review-unknown-places --dry-mode --dry-run-file DRYRUN2.txt
-PYTHONPATH=src python3 -m curator organize --mode migration --transfer copy --source test/runtime/source --library test/runtime/library --review-ui --dry-mode --dry-run-file DRYRUN2.txt
-```
-
-Add `--apply` only after reviewing the generated plan.
-
-`--dry-mode` writes a fake destination hierarchy to `SOURCE/DRYRUN.txt` and applies no copy/move operations. Use `--dry-run-file DRYRUN2.txt` to choose a different preview filename.
 
 ## LLM Place Identification
 

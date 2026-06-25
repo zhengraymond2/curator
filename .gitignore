@@ -1,4 +1,5 @@
 test/
+.venv/
 .env
 .env.*
 !.env.example

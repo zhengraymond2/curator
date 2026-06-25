@@ -1,0 +1,120 @@
+# Source this file from the repository root or any subdirectory:
+#
+#   source scripts/env
+#
+# It creates .venv when needed, activates it, and installs Curator editable.
+
+if (return 0 2>/dev/null); then
+  _CURATOR_ENV_SOURCED=1
+else
+  _CURATOR_ENV_SOURCED=0
+fi
+
+_curator_env_fail() {
+  echo "scripts/env: $1" >&2
+  if [ "$_CURATOR_ENV_SOURCED" = "1" ]; then
+    return 1
+  fi
+  exit 1
+}
+
+if [ -n "${BASH_VERSION:-}" ]; then
+  _CURATOR_ENV_SCRIPT="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  _CURATOR_ENV_SCRIPT="${(%):-%x}"
+else
+  _CURATOR_ENV_SCRIPT="$0"
+fi
+
+_CURATOR_ROOT="$(CDPATH= cd "$(dirname "$_CURATOR_ENV_SCRIPT")/.." && pwd)" ||
+  { _curator_env_fail "could not find repository root"; return 1; }
+_CURATOR_VENV="${CURATOR_VENV:-$_CURATOR_ROOT/.venv}"
+_CURATOR_VERSION="$(cat "$_CURATOR_ROOT/.python-version" 2>/dev/null || true)"
+
+if [ -n "${CURATOR_PYTHON:-}" ]; then
+  _CURATOR_PYTHON="$CURATOR_PYTHON"
+elif [ -x "$_CURATOR_VENV/bin/python" ]; then
+  _CURATOR_PYTHON="$_CURATOR_VENV/bin/python"
+elif [ -n "$_CURATOR_VERSION" ] && command -v pyenv >/dev/null 2>&1; then
+  if pyenv versions --bare | grep -qx "$_CURATOR_VERSION"; then
+    _CURATOR_PYTHON="$(PYENV_VERSION="$_CURATOR_VERSION" pyenv which python)"
+  else
+    _curator_env_fail "pyenv Python $_CURATOR_VERSION is not installed; run: pyenv install $_CURATOR_VERSION" ||
+      return 1
+  fi
+elif command -v python3 >/dev/null 2>&1; then
+  _CURATOR_PYTHON="$(command -v python3)"
+  if [ -n "$_CURATOR_VERSION" ]; then
+    echo "scripts/env: pyenv is not available; using $_CURATOR_PYTHON instead of Python $_CURATOR_VERSION" >&2
+  fi
+else
+  _curator_env_fail "could not find python3; set CURATOR_PYTHON=/path/to/python3" || return 1
+fi
+
+"$_CURATOR_PYTHON" - <<'PY' ||
+import sys
+
+if sys.version_info < (3, 9):
+    raise SystemExit("Curator requires Python 3.9 or newer")
+PY
+  { _curator_env_fail "$_CURATOR_PYTHON is not a compatible Python"; return 1; }
+
+if [ ! -x "$_CURATOR_VENV/bin/python" ]; then
+  echo "Creating $_CURATOR_VENV"
+  "$_CURATOR_PYTHON" -m venv "$_CURATOR_VENV" ||
+    { _curator_env_fail "failed to create virtual environment"; return 1; }
+elif [ -n "$_CURATOR_VERSION" ]; then
+  _CURATOR_VENV_VERSION="$("$_CURATOR_VENV/bin/python" - <<'PY'
+import sys
+
+print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+PY
+)"
+  if [ "$_CURATOR_VENV_VERSION" != "$_CURATOR_VERSION" ]; then
+    echo "scripts/env: existing .venv uses Python $_CURATOR_VENV_VERSION; remove .venv to recreate with $_CURATOR_VERSION" >&2
+  fi
+fi
+
+. "$_CURATOR_VENV/bin/activate" ||
+  { _curator_env_fail "failed to activate $_CURATOR_VENV"; return 1; }
+
+_CURATOR_EXTRAS="${CURATOR_EXTRAS:-}"
+if [ -n "$_CURATOR_EXTRAS" ]; then
+  _CURATOR_INSTALL_TARGET="$_CURATOR_ROOT[$_CURATOR_EXTRAS]"
+else
+  _CURATOR_INSTALL_TARGET="$_CURATOR_ROOT"
+fi
+_CURATOR_STAMP="$_CURATOR_VENV/.curator-env-stamp"
+_CURATOR_STAMP_VALUE="$_CURATOR_INSTALL_TARGET"
+_CURATOR_CURRENT_STAMP="$(cat "$_CURATOR_STAMP" 2>/dev/null || true)"
+
+if [ ! -f "$_CURATOR_STAMP" ] ||
+  [ "$_CURATOR_ROOT/pyproject.toml" -nt "$_CURATOR_STAMP" ] ||
+  [ "$_CURATOR_CURRENT_STAMP" != "$_CURATOR_STAMP_VALUE" ]; then
+  python -m pip install --upgrade pip setuptools wheel ||
+    { _curator_env_fail "failed to upgrade Python packaging tools"; return 1; }
+  python -m pip install -e "$_CURATOR_INSTALL_TARGET" ||
+    { _curator_env_fail "failed to install Curator"; return 1; }
+  printf '%s\n' "$_CURATOR_STAMP_VALUE" >"$_CURATOR_STAMP"
+fi
+
+echo "Curator environment active: $VIRTUAL_ENV"
+python --version
+
+if [ "$_CURATOR_ENV_SOURCED" != "1" ]; then
+  echo "Activation only persists when sourced. Run: source scripts/env"
+fi
+
+unset _CURATOR_CURRENT_STAMP
+unset _CURATOR_ENV_SCRIPT
+unset _CURATOR_ENV_SOURCED
+unset _CURATOR_EXTRAS
+unset _CURATOR_INSTALL_TARGET
+unset _CURATOR_PYTHON
+unset _CURATOR_ROOT
+unset _CURATOR_STAMP
+unset _CURATOR_STAMP_VALUE
+unset _CURATOR_VENV
+unset _CURATOR_VENV_VERSION
+unset _CURATOR_VERSION
+unset -f _curator_env_fail 2>/dev/null || true
