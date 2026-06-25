@@ -8,7 +8,7 @@ from .paths import is_relative_to, safe_component
 from .plan import Operation, Plan, make_plan, new_run_id
 from .scan import scan_media
 
-SHOOT_GAP_SECONDS = 15 * 60
+SHOOT_GAP_SECONDS = 60 * 60
 
 
 def build_organize_plan(source: Path, library: Path, *, mode: str, transfer: str = "copy") -> Plan:
