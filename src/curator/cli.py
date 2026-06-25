@@ -143,8 +143,9 @@ def cmd_organize(args: argparse.Namespace) -> int:
             write_plan(plan, args.plan)
             print(f"Wrote plan: {args.plan}")
         dryrun_path = write_dryrun_file(plan, args.source, filename=args.dry_run_file)
-        print(plan.summary())
-        print(f"Wrote dry-run hierarchy: {dryrun_path}")
+        if progress.debug_enabled:
+            print(plan.summary())
+            print(f"Wrote dry-run hierarchy: {dryrun_path}")
         print("No copy/move operations were applied.")
         return 0
     return handle_generated_plan(plan, args, default_log_root=args.library / ".curator" / "logs", progress=progress)

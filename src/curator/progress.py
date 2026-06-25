@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -11,17 +12,24 @@ ProgressMessage = Union[str, Callable[[], str]]
 
 
 class ProgressReporter:
-    def __init__(self, stream: TextIO | None = None, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        stream: TextIO | None = None,
+        *,
+        enabled: bool = True,
+        debug_enabled: bool | None = None,
+    ) -> None:
         self.stream = stream or sys.stderr
         self.enabled = enabled
+        self.debug_enabled = "DEBUG" in os.environ if debug_enabled is None else debug_enabled
         self._lock = threading.Lock()
 
     @classmethod
     def disabled(cls) -> "ProgressReporter":
         return cls(enabled=False)
 
-    def log(self, message: str) -> None:
-        if not self.enabled:
+    def log(self, message: str, *, debug: bool = False) -> None:
+        if not self.enabled or (debug and not self.debug_enabled):
             return
         with self._lock:
             self.stream.write(f"[curator] {message}\n")
@@ -34,8 +42,9 @@ class ProgressReporter:
         *,
         done: ProgressMessage | None = None,
         failed: ProgressMessage | None = None,
+        debug: bool = False,
     ) -> Iterator[None]:
-        if not self.enabled:
+        if not self.enabled or (debug and not self.debug_enabled):
             yield
             return
 
