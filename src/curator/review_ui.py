@@ -194,7 +194,8 @@ class SequentialReviewState:
             self.current = None
             self.item_ready.clear()
             self.item_done.set()
-            return {"loading": True, "done": False, "index": self.index + 1, "total": self.total}
+            self.index += 1
+            return {"loading": True, "done": False, "index": self.index, "total": self.total}
 
     def finish(self) -> None:
         with self.lock:
@@ -544,7 +545,13 @@ HTML = """<!doctype html>
         return;
       }
       if (current.loading) {
-        document.getElementById('progress').textContent = `Preparing group ${Math.min((current.index || 0) + 1, current.total)} / ${current.total}`;
+        let content;
+        if (current.index == current.total) {
+          content = "Finished";
+        } else {
+          content = `Preparing group ${current.index + 1} / ${current.total}`;
+        }
+        document.getElementById('progress').textContent = content;
         const gallery = document.getElementById('gallery');
         if (gallery) gallery.innerHTML = '<div class="loading">Preparing the next album suggestion...</div>';
         for (const id of ['group', 'file-count', 'confidence', 'rationale', 'context']) {
