@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from .metadata import capture_timestamps
+from .metadata import capture_timestamps, metadata_cache_path
 from .paths import is_relative_to, safe_component, safe_human_component
 from .place_identification import (
     DEFAULT_JPEG_QUALITY,
@@ -91,7 +91,8 @@ def build_organize_plan(
         if mode == "ongoing" and is_relative_to(media.path, originals):
             continue
         timestamped_files.append(media)
-    timestamps = capture_timestamps([media.path for media in timestamped_files])
+    timestamp_cache = metadata_cache_path(library)
+    timestamps = capture_timestamps([media.path for media in timestamped_files], cache_path=timestamp_cache)
     bundles = build_media_bundles(source, timestamped_files, timestamps)
 
     identifications = dict(place_identifications or {})
@@ -154,6 +155,7 @@ def build_organize_plan(
             "layout": "Originals/Country/Album",
             "unknown_country": "Unsorted",
             "timestamp_source": "exiftool_then_sips_then_mdls_then_filesystem_mtime",
+            "metadata_cache": str(timestamp_cache),
         },
     )
 

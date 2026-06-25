@@ -39,6 +39,8 @@ IMAGE_METADATA_EXTENSIONS = {
     ".tiff",
 }
 COMMAND_CHUNK_SIZE = 100
+METADATA_CACHE_FILENAME = "metadata-cache.json"
+METADATA_CACHE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -48,19 +50,125 @@ class CaptureTimestamp:
     raw: str | None = None
 
 
+class MetadataTimestampCache:
+    def __init__(self, path: Path, entries: dict[str, object] | None = None) -> None:
+        self.path = path
+        self.entries = entries or {}
+        self.dirty = False
+
+    @classmethod
+    def load(cls, path: Path) -> "MetadataTimestampCache":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return cls(path)
+
+        if not isinstance(payload, dict) or payload.get("version") != METADATA_CACHE_VERSION:
+            return cls(path)
+        entries = payload.get("entries")
+        if not isinstance(entries, dict):
+            return cls(path)
+        return cls(path, entries)
+
+    def get(self, path: Path) -> CaptureTimestamp | None:
+        entry = self.entries.get(cache_key(path))
+        if not isinstance(entry, dict):
+            return None
+
+        try:
+            stat = path.stat()
+            size = int(entry["size"])
+            mtime_ns = int(entry["mtime_ns"])
+            epoch = float(entry["epoch"])
+            source = entry["source"]
+        except (KeyError, OSError, TypeError, ValueError):
+            return None
+
+        if size != stat.st_size or mtime_ns != stat.st_mtime_ns or not isinstance(source, str):
+            return None
+
+        raw = entry.get("raw")
+        return CaptureTimestamp(epoch=epoch, source=source, raw=raw if isinstance(raw, str) else None)
+
+    def put(self, path: Path, timestamp: CaptureTimestamp) -> None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+
+        key = cache_key(path)
+        entry = {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "epoch": timestamp.epoch,
+            "source": timestamp.source,
+            "raw": timestamp.raw,
+        }
+        if self.entries.get(key) != entry:
+            self.entries[key] = entry
+            self.dirty = True
+
+    def save(self) -> None:
+        if not self.dirty:
+            return
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_name(f"{self.path.name}.tmp")
+        payload = {
+            "version": METADATA_CACHE_VERSION,
+            "entries": self.entries,
+        }
+        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp_path.replace(self.path)
+
+
+def metadata_cache_path(library_root: Path) -> Path:
+    return library_root.expanduser().resolve() / ".curator" / METADATA_CACHE_FILENAME
+
+
+def cache_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path.expanduser().absolute())
+
+
 def capture_timestamp(path: Path) -> CaptureTimestamp:
     return capture_timestamps([path])[path]
 
 
-def capture_timestamps(paths: list[Path]) -> dict[Path, CaptureTimestamp]:
+def capture_timestamps(paths: list[Path], *, cache_path: Path | None = None) -> dict[Path, CaptureTimestamp]:
     timestamps: dict[Path, CaptureTimestamp] = {}
     remaining = list(paths)
+    cache = MetadataTimestampCache.load(cache_path) if cache_path is not None else None
+    cached_paths: set[Path] = set()
+
+    def finish() -> dict[Path, CaptureTimestamp]:
+        if cache is not None:
+            for cached_path, timestamp in timestamps.items():
+                if cached_path in cached_paths:
+                    continue
+                cache.put(cached_path, timestamp)
+            cache.save()
+        return timestamps
+
+    if cache is not None:
+        for path in remaining:
+            cached = cache.get(path)
+            if cached is not None:
+                timestamps[path] = cached
+                cached_paths.add(path)
+        remaining = [path for path in remaining if path not in timestamps]
+        if not remaining:
+            return finish()
 
     for path, tag, value in exiftool_capture_dates(remaining):
         parsed = parse_exif_date(value)
         if parsed is not None:
             timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source=f"exiftool:{tag}", raw=value)
     remaining = [path for path in remaining if path not in timestamps]
+    if not remaining:
+        return finish()
 
     image_paths = [path for path in remaining if path.suffix.casefold() in IMAGE_METADATA_EXTENSIONS]
     for path, value in sips_creation_dates(image_paths).items():
@@ -68,17 +176,21 @@ def capture_timestamps(paths: list[Path]) -> dict[Path, CaptureTimestamp]:
         if parsed is not None:
             timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="sips:creation", raw=value)
     remaining = [path for path in remaining if path not in timestamps]
+    if not remaining:
+        return finish()
 
     for path, value in mdls_content_creation_dates(remaining).items():
         parsed = parse_mdls_date(value)
         if parsed is not None:
             timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="mdls:kMDItemContentCreationDate", raw=value)
     remaining = [path for path in remaining if path not in timestamps]
+    if not remaining:
+        return finish()
 
     for path in remaining:
         timestamps[path] = CaptureTimestamp(epoch=path.stat().st_mtime, source="filesystem_mtime")
 
-    return timestamps
+    return finish()
 
 
 def exiftool_capture_date(path: Path) -> tuple[str, str] | None:
