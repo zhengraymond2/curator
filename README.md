@@ -102,7 +102,8 @@ bundle. The UI shows the model guess, a location textbox, and a gallery of every
 image in the bundle. Press Enter or click `Save / Continue` to advance. The
 location textbox accepts `Country/Place` or a place name, and suggests previously
 entered places with case-insensitive fuzzy matching; selecting an existing place
-reuses the same destination folder.
+reuses the same destination folder. Use `Create New Album: XYZ` at the bottom of
+the dropdown to keep the typed album name instead of the closest match.
 Each reviewed location becomes context for the next model prompt, with the most
 recent country/region treated as the active trip context.
 
