@@ -227,7 +227,7 @@ Important options:
 
 `--review-unknown-places` makes unknown model results interactive: Curator opens the sampled images in a macOS Quick Look gallery, the user closes it with Esc, and then enters a corrected location in the CLI.
 
-`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. The page shows the model guess, a country textbox, a place textbox, all prepared images in the bundle, confidence, rationale, and visible evidence. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle. When all bundles are reviewed, Curator writes the requested dry-run file.
+`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. The page shows the model guess, a location textbox, all prepared images in the bundle, confidence, rationale, and visible evidence. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle. When all bundles are reviewed, Curator writes the requested dry-run file.
 
 The review UI keeps a list of previously entered places and uses it in two ways:
 

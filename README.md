@@ -98,10 +98,11 @@ returns an unknown location. Close the gallery with Esc, then enter `Country/Pla
 or a place name in the CLI.
 
 Add `--review-ui` to open a local browser review flow for every place-identified
-bundle. The UI shows the model guess, a `Country` textbox, a `Place` textbox, and
-a gallery of every image in the bundle. Press Enter or click `Save / Continue` to
-advance. The place textbox suggests previously entered places with case-insensitive
-fuzzy matching; selecting an existing place reuses the same destination folder.
+bundle. The UI shows the model guess, a location textbox, and a gallery of every
+image in the bundle. Press Enter or click `Save / Continue` to advance. The
+location textbox accepts `Country/Place` or a place name, and suggests previously
+entered places with case-insensitive fuzzy matching; selecting an existing place
+reuses the same destination folder.
 Each reviewed location becomes context for the next model prompt, with the most
 recent country/region treated as the active trip context.
 
