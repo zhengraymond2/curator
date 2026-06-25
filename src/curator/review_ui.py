@@ -28,6 +28,7 @@ class ReviewItem:
     file_count: int
     suggestions: tuple[LocationSuggestion, ...] = ()
     context_summary: str = ""
+    llm_pending: bool = False
 
 
 class ReviewState:
@@ -35,6 +36,8 @@ class ReviewState:
         self.items = list(items)
         self.index = 0
         self.decisions: dict[str, PlaceIdentification] = {}
+        self.llm_data: dict[str, PlaceIdentification] = {}
+        self.llm_errors: dict[str, str] = {}
         self.done = threading.Event()
         self.lock = threading.Lock()
 
@@ -42,7 +45,13 @@ class ReviewState:
         with self.lock:
             if self.index >= len(self.items):
                 return {"done": True, "index": self.index, "total": len(self.items)}
-            return review_item_payload(self.items[self.index], self.index, len(self.items))
+            return review_item_payload(
+                self.items[self.index],
+                self.index,
+                len(self.items),
+                llm_data=self.llm_data,
+                llm_errors=self.llm_errors,
+            )
 
     def decide(self, country_or_region: str | None, place_name: str | None) -> Mapping[str, object]:
         with self.lock:
@@ -51,7 +60,7 @@ class ReviewState:
                 return {"done": True}
 
             item = self.items[self.index]
-            original = item.identification
+            original = self.llm_data.get(item.identification.group_id, item.identification)
             country, place = resolve_location(
                 country_or_region,
                 place_name,
@@ -71,7 +80,22 @@ class ReviewState:
             if self.index >= len(self.items):
                 self.done.set()
                 return {"done": True}
-            return review_item_payload(self.items[self.index], self.index, len(self.items))
+            return review_item_payload(
+                self.items[self.index],
+                self.index,
+                len(self.items),
+                llm_data=self.llm_data,
+                llm_errors=self.llm_errors,
+            )
+
+    def store_llm_result(self, identification: PlaceIdentification) -> None:
+        with self.lock:
+            self.llm_data[identification.group_id] = identification
+            self.llm_errors.pop(identification.group_id, None)
+
+    def store_llm_error(self, group_id: str, error: Exception) -> None:
+        with self.lock:
+            self.llm_errors[group_id] = str(error)
 
 
 def review_place_identifications_in_browser(
@@ -145,6 +169,8 @@ class SequentialReviewState:
         self.index = 0
         self.current: ReviewItem | None = None
         self.decision: PlaceIdentification | None = None
+        self.llm_data: dict[str, PlaceIdentification] = {}
+        self.llm_errors: dict[str, str] = {}
         self.item_ready = threading.Event()
         self.item_done = threading.Event()
         self.done = threading.Event()
@@ -169,14 +195,20 @@ class SequentialReviewState:
                 return {"done": True, "index": self.index, "total": self.total}
             if self.current is None:
                 return {"loading": True, "done": False, "index": self.index, "total": self.total}
-            return review_item_payload(self.current, self.index, self.total)
+            return review_item_payload(
+                self.current,
+                self.index,
+                self.total,
+                llm_data=self.llm_data,
+                llm_errors=self.llm_errors,
+            )
 
     def decide(self, country_or_region: str | None, place_name: str | None) -> Mapping[str, object]:
         with self.lock:
             if self.current is None:
                 return {"loading": True, "done": False, "index": self.index, "total": self.total}
             item = self.current
-            original = item.identification
+            original = self.llm_data.get(item.identification.group_id, item.identification)
             country, place = resolve_location(
                 country_or_region,
                 place_name,
@@ -197,6 +229,15 @@ class SequentialReviewState:
             self.index += 1
             return {"loading": True, "done": False, "index": self.index, "total": self.total}
 
+    def store_llm_result(self, identification: PlaceIdentification) -> None:
+        with self.lock:
+            self.llm_data[identification.group_id] = identification
+            self.llm_errors.pop(identification.group_id, None)
+
+    def store_llm_error(self, group_id: str, error: Exception) -> None:
+        with self.lock:
+            self.llm_errors[group_id] = str(error)
+
     def finish(self) -> None:
         with self.lock:
             self.current = None
@@ -205,20 +246,34 @@ class SequentialReviewState:
             self.item_done.set()
 
 
-def review_item_payload(item: ReviewItem, index: int, total: int) -> Mapping[str, object]:
-    identification = item.identification
+def review_item_payload(
+    item: ReviewItem,
+    index: int,
+    total: int,
+    *,
+    llm_data: Mapping[str, PlaceIdentification] | None = None,
+    llm_errors: Mapping[str, str] | None = None,
+) -> Mapping[str, object]:
+    group_id = item.identification.group_id
+    llm_data = llm_data or {}
+    llm_errors = llm_errors or {}
+    identification = llm_data.get(group_id, item.identification)
+    llm_loading = item.llm_pending and group_id not in llm_data and group_id not in llm_errors
+    llm_error = llm_errors.get(group_id, "")
     return {
         "done": False,
         "index": index,
         "total": total,
-        "group_id": identification.group_id,
-        "country_or_region": identification.country_or_region,
-        "place_name": identification.place_name,
-        "confidence": identification.confidence,
-        "is_unknown": identification.is_unknown,
-        "rationale": identification.rationale,
-        "visual_evidence": list(identification.visual_evidence),
-        "alternate_guesses": list(identification.alternate_guesses),
+        "group_id": group_id,
+        "country_or_region": "" if llm_loading else identification.country_or_region,
+        "place_name": "" if llm_loading else identification.place_name,
+        "confidence": None if llm_loading else identification.confidence,
+        "is_unknown": False if llm_loading else identification.is_unknown,
+        "rationale": "" if llm_loading else identification.rationale,
+        "visual_evidence": [] if llm_loading else list(identification.visual_evidence),
+        "alternate_guesses": [] if llm_loading else list(identification.alternate_guesses),
+        "llm_loading": llm_loading,
+        "llm_error": llm_error,
         "file_count": item.file_count,
         "context_summary": item.context_summary,
         "suggestions": [
@@ -490,6 +545,23 @@ HTML = """<!doctype html>
       border-radius: 8px;
       color: var(--muted);
     }
+    .inline-loading {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+    }
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid #d7d4cc;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
     @media (max-width: 820px) {
       form { grid-template-columns: 1fr; }
       main { grid-template-columns: 1fr; }
@@ -528,6 +600,8 @@ HTML = """<!doctype html>
   <script>
     let current = null;
     let activeSuggestion = null;
+    let lastGroupId = null;
+    let placeDirty = false;
 
     async function loadState() {
       const response = await fetch('/api/state');
@@ -551,6 +625,8 @@ HTML = """<!doctype html>
         return;
       }
       if (current.loading) {
+        lastGroupId = null;
+        placeDirty = false;
         let content;
         if (current.index == current.total) {
           content = "Finished";
@@ -569,12 +645,29 @@ HTML = """<!doctype html>
         setTimeout(loadState, 900);
         return;
       }
+      const groupChanged = current.group_id !== lastGroupId;
+      if (groupChanged) {
+        lastGroupId = current.group_id;
+        placeDirty = false;
+        activeSuggestion = null;
+      }
       document.getElementById('progress').textContent = `Group ${current.index + 1} / ${current.total}`;
-      document.getElementById('place').value = current.place_name || '';
+      const placeInput = document.getElementById('place');
+      if (!placeDirty) {
+        placeInput.value = current.place_name || '';
+      }
       document.getElementById('group').textContent = current.group_id;
       document.getElementById('file-count').textContent = current.file_count;
-      document.getElementById('confidence').textContent = `${Math.round((current.confidence || 0) * 100)}%${current.is_unknown ? ' · unknown' : ''}`;
-      document.getElementById('rationale').textContent = current.rationale || '';
+      if (current.llm_loading) {
+        document.getElementById('confidence').innerHTML = '<span class="inline-loading"><span class="spinner" aria-hidden="true"></span><span>Loading suggestion...</span></span>';
+        document.getElementById('rationale').textContent = '';
+      } else if (current.llm_error) {
+        document.getElementById('confidence').textContent = 'Unavailable';
+        document.getElementById('rationale').textContent = current.llm_error;
+      } else {
+        document.getElementById('confidence').textContent = `${Math.round((current.confidence || 0) * 100)}%${current.is_unknown ? ' · unknown' : ''}`;
+        document.getElementById('rationale').textContent = current.rationale || '';
+      }
       document.getElementById('context').textContent = current.context_summary || '';
       renderList('evidence', current.visual_evidence);
       renderList('alternates', current.alternate_guesses);
@@ -592,9 +685,14 @@ HTML = """<!doctype html>
         figure.appendChild(caption);
         gallery.appendChild(figure);
       }
-      document.getElementById('place').focus();
-      document.getElementById('place').select();
+      if (groupChanged) {
+        placeInput.focus();
+        placeInput.select();
+      }
       renderSuggestions();
+      if (current.llm_loading) {
+        setTimeout(loadState, 900);
+      }
     }
 
     async function submitDecision(place) {
@@ -693,10 +791,14 @@ HTML = """<!doctype html>
 
     document.getElementById('review-form').addEventListener('submit', (event) => {
       event.preventDefault();
+      placeDirty = false;
       submitDecision(document.getElementById('place').value);
     });
 
-    document.getElementById('place').addEventListener('input', renderSuggestions);
+    document.getElementById('place').addEventListener('input', () => {
+      placeDirty = true;
+      renderSuggestions();
+    });
 
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {

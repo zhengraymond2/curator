@@ -44,6 +44,35 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(payload["file_count"], 42)
         self.assertEqual(payload["images"][0]["filename"], "DSC_0001.NEF")
 
+    def test_pending_review_item_payload_uses_llm_data_when_available(self) -> None:
+        fallback = PlaceIdentification(
+            group_id="103NCZ_6::01",
+            country_or_region="Unsorted",
+            place_name="103NCZ_6",
+            confidence=0.0,
+            is_unknown=True,
+            rationale="pending",
+            visual_evidence=(),
+            alternate_guesses=(),
+            sampled_paths=(Path("DSC_0001.NEF"),),
+            raw_response={},
+        )
+        item = ReviewItem(fallback, (sample_image(),), file_count=42, llm_pending=True)
+
+        loading = review_item_payload(item, index=0, total=3)
+        loaded = review_item_payload(
+            item,
+            index=0,
+            total=3,
+            llm_data={"103NCZ_6::01": sample_identification()},
+        )
+
+        self.assertTrue(loading["llm_loading"])
+        self.assertEqual(loading["place_name"], "")
+        self.assertEqual(loading["images"][0]["filename"], "DSC_0001.NEF")
+        self.assertFalse(loaded["llm_loading"])
+        self.assertEqual(loaded["place_name"], "unknown beach")
+
     def test_review_state_records_decision_and_advances(self) -> None:
         state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
 

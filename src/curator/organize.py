@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -27,7 +28,7 @@ from .place_identification import (
 )
 from .plan import Operation, Plan, make_plan, new_run_id
 from .progress import ProgressReporter
-from .review_ui import BrowserReviewSession, LocationSuggestion, ReviewItem
+from .review_ui import BrowserReviewSession, LocationSuggestion, ReviewItem, SequentialReviewState
 from .scan import MediaFile, scan_media
 
 SHOOT_GAP_SECONDS = 60 * 60
@@ -386,10 +387,13 @@ def identify_bundle_places_with_review_ui(
                     samples = select_place_identification_samples(photos)
                     prepared_samples = [model_preprocessor.prepare(photo) for photo in samples]
                     prompt = place_prompt_with_context(base_prompt, accepted)
-                    identification = identifier.identify_prepared_images(
-                        bundle.group_id,
-                        prepared_samples,
+                    start_llm_identification(
+                        session.state,
+                        identifier=identifier,
+                        group_id=bundle.group_id,
+                        prepared_images=tuple(prepared_samples),
                         prompt=prompt,
+                        progress=progress,
                     )
                     gallery_images = prepare_gallery_images(photos, gallery_preprocessor)
             except ImagePreparationError:
@@ -399,11 +403,12 @@ def identify_bundle_places_with_review_ui(
             progress.log(f"Waiting for browser review {index + 1}/{len(bundles)} ({bundle.group_id})")
             reviewed = session.review(
                 ReviewItem(
-                    identification=identification,
+                    identification=pending_place_identification(bundle, prepared_samples),
                     prepared_images=tuple(gallery_images or prepared_samples),
                     file_count=len(bundle.media),
                     suggestions=tuple(accepted),
                     context_summary=active_context_summary(accepted),
+                    llm_pending=True,
                 ),
                 index=index,
             )
@@ -443,6 +448,53 @@ def prepare_gallery_images(
         except ImagePreparationError:
             continue
     return prepared
+
+
+def start_llm_identification(
+    state: SequentialReviewState,
+    *,
+    identifier: OpenRouterPlaceIdentifier,
+    group_id: str,
+    prepared_images: tuple[PreparedImage, ...],
+    prompt: str,
+    progress: ProgressReporter,
+) -> threading.Thread:
+    def identify() -> None:
+        try:
+            identification = identifier.identify_prepared_images(group_id, prepared_images, prompt=prompt)
+        except Exception as exc:
+            state.store_llm_error(group_id, exc)
+            progress.log(f"LLM place identification failed for {group_id}: {exc}")
+            return
+
+        state.store_llm_result(identification)
+        progress.log(f"LLM place identification ready for {group_id}")
+
+    thread = threading.Thread(
+        target=identify,
+        name=f"curator-llm-{safe_component(group_id, 'group')}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def pending_place_identification(
+    bundle: MediaBundle,
+    prepared_samples: Sequence[PreparedImage],
+) -> PlaceIdentification:
+    return PlaceIdentification(
+        group_id=bundle.group_id,
+        country_or_region="Unsorted",
+        place_name=bundle.fallback_name,
+        confidence=0.0,
+        is_unknown=True,
+        rationale="LLM data was not available when this album was reviewed.",
+        visual_evidence=(),
+        alternate_guesses=(),
+        sampled_paths=tuple(image.source_path for image in prepared_samples),
+        raw_response={},
+    )
 
 
 def add_location_suggestion(
