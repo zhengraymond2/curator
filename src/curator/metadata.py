@@ -173,7 +173,7 @@ def capture_timestamps(
     if remaining:
         before = len(timestamps)
         with progress.step(
-            f"Reading capture metadata with exiftool for {len(remaining)} file(s)",
+            f"Reading metadata for {len(remaining)} file(s)",
             done=lambda: f"Exiftool matched {len(timestamps) - before} file(s)",
         ):
             for path, tag, value in exiftool_capture_dates(remaining):
