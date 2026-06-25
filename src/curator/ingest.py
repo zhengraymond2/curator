@@ -7,9 +7,17 @@ from pathlib import Path
 from .checksums import sha256_file
 from .paths import safe_component
 from .plan import Operation, Plan, make_plan, new_run_id
+from .progress import ProgressReporter
 
 
-def build_ingest_plan(source: Path, dest_root: Path, *, name: str | None = None) -> Plan:
+def build_ingest_plan(
+    source: Path,
+    dest_root: Path,
+    *,
+    name: str | None = None,
+    progress: ProgressReporter | None = None,
+) -> Plan:
+    progress = progress or ProgressReporter.disabled()
     source = source.expanduser().resolve()
     dest_root = dest_root.expanduser().resolve()
     if not source.is_dir():
@@ -22,34 +30,44 @@ def build_ingest_plan(source: Path, dest_root: Path, *, name: str | None = None)
     manifest_files: list[dict[str, object]] = []
     checksum_lines: list[str] = []
 
-    for src in sorted(path for path in source.rglob("*") if path.is_file()):
-        if any(part == ".curator" for part in src.parts):
-            continue
-        rel = src.relative_to(source)
-        dest = ingest_root / rel
-        digest = sha256_file(src)
-        size = src.stat().st_size
-        operations.append(
-            Operation(
-                type="copy",
-                src=str(src),
-                dest=str(dest),
-                reason="ingest",
-                expected_size=size,
-                expected_sha256=digest,
-                metadata={"relative_path": str(rel)},
+    with progress.step(
+        f"Scanning source files under {source}",
+        done=lambda: f"Found {len(source_files)} source file(s)",
+    ):
+        source_files = sorted(
+            path for path in source.rglob("*") if path.is_file() and not any(part == ".curator" for part in path.parts)
+        )
+
+    with progress.step(
+        f"Hashing {len(source_files)} source file(s)",
+        done=lambda: f"Hashed {len(manifest_files)} source file(s)",
+    ):
+        for src in source_files:
+            rel = src.relative_to(source)
+            dest = ingest_root / rel
+            digest = sha256_file(src)
+            size = src.stat().st_size
+            operations.append(
+                Operation(
+                    type="copy",
+                    src=str(src),
+                    dest=str(dest),
+                    reason="ingest",
+                    expected_size=size,
+                    expected_sha256=digest,
+                    metadata={"relative_path": str(rel)},
+                )
             )
-        )
-        manifest_files.append(
-            {
-                "source": str(src),
-                "dest": str(dest),
-                "relative_path": str(rel),
-                "size": size,
-                "sha256": digest,
-            }
-        )
-        checksum_lines.append(f"{digest}  {rel.as_posix()}")
+            manifest_files.append(
+                {
+                    "source": str(src),
+                    "dest": str(dest),
+                    "relative_path": str(rel),
+                    "size": size,
+                    "sha256": digest,
+                }
+            )
+            checksum_lines.append(f"{digest}  {rel.as_posix()}")
 
     manifest = {
         "run_id": run_id,
@@ -90,4 +108,3 @@ def build_ingest_plan(source: Path, dest_root: Path, *, name: str | None = None)
             "bytes": sum(int(item["size"]) for item in manifest_files),
         },
     )
-

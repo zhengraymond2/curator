@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .progress import ProgressReporter
+
 
 MDLS_DATE_FORMAT = "%Y-%m-%d %H:%M:%S %z"
 EXIF_DATE_FORMATS = (
@@ -137,7 +139,13 @@ def capture_timestamp(path: Path) -> CaptureTimestamp:
     return capture_timestamps([path])[path]
 
 
-def capture_timestamps(paths: list[Path], *, cache_path: Path | None = None) -> dict[Path, CaptureTimestamp]:
+def capture_timestamps(
+    paths: list[Path],
+    *,
+    cache_path: Path | None = None,
+    progress: ProgressReporter | None = None,
+) -> dict[Path, CaptureTimestamp]:
+    progress = progress or ProgressReporter.disabled()
     timestamps: dict[Path, CaptureTimestamp] = {}
     remaining = list(paths)
     cache = MetadataTimestampCache.load(cache_path) if cache_path is not None else None
@@ -162,33 +170,58 @@ def capture_timestamps(paths: list[Path], *, cache_path: Path | None = None) -> 
         if not remaining:
             return finish()
 
-    for path, tag, value in exiftool_capture_dates(remaining):
-        parsed = parse_exif_date(value)
-        if parsed is not None:
-            timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source=f"exiftool:{tag}", raw=value)
+    if remaining:
+        before = len(timestamps)
+        with progress.step(
+            f"Reading capture metadata with exiftool for {len(remaining)} file(s)",
+            done=lambda: f"Exiftool matched {len(timestamps) - before} file(s)",
+        ):
+            for path, tag, value in exiftool_capture_dates(remaining):
+                parsed = parse_exif_date(value)
+                if parsed is not None:
+                    timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source=f"exiftool:{tag}", raw=value)
     remaining = [path for path in remaining if path not in timestamps]
     if not remaining:
         return finish()
 
     image_paths = [path for path in remaining if path.suffix.casefold() in IMAGE_METADATA_EXTENSIONS]
-    for path, value in sips_creation_dates(image_paths).items():
-        parsed = parse_exif_date(value)
-        if parsed is not None:
-            timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="sips:creation", raw=value)
+    if image_paths:
+        before = len(timestamps)
+        with progress.step(
+            f"Reading image metadata with sips for {len(image_paths)} file(s)",
+            done=lambda: f"Sips matched {len(timestamps) - before} file(s)",
+        ):
+            for path, value in sips_creation_dates(image_paths).items():
+                parsed = parse_exif_date(value)
+                if parsed is not None:
+                    timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="sips:creation", raw=value)
     remaining = [path for path in remaining if path not in timestamps]
     if not remaining:
         return finish()
 
-    for path, value in mdls_content_creation_dates(remaining).items():
-        parsed = parse_mdls_date(value)
-        if parsed is not None:
-            timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="mdls:kMDItemContentCreationDate", raw=value)
+    if remaining:
+        before = len(timestamps)
+        with progress.step(
+            f"Reading Spotlight metadata with mdls for {len(remaining)} file(s)",
+            done=lambda: f"Mdls matched {len(timestamps) - before} file(s)",
+        ):
+            for path, value in mdls_content_creation_dates(remaining).items():
+                parsed = parse_mdls_date(value)
+                if parsed is not None:
+                    timestamps[path] = CaptureTimestamp(
+                        epoch=parsed.timestamp(), source="mdls:kMDItemContentCreationDate", raw=value
+                    )
     remaining = [path for path in remaining if path not in timestamps]
     if not remaining:
         return finish()
 
-    for path in remaining:
-        timestamps[path] = CaptureTimestamp(epoch=path.stat().st_mtime, source="filesystem_mtime")
+    if remaining:
+        with progress.step(
+            f"Using filesystem modified times for {len(remaining)} file(s)",
+            done=lambda: f"Used filesystem modified times for {len(remaining)} file(s)",
+        ):
+            for path in remaining:
+                timestamps[path] = CaptureTimestamp(epoch=path.stat().st_mtime, source="filesystem_mtime")
 
     return finish()
 

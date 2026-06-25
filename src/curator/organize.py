@@ -26,6 +26,7 @@ from .place_identification import (
     select_place_identification_samples,
 )
 from .plan import Operation, Plan, make_plan, new_run_id
+from .progress import ProgressReporter
 from .review_ui import BrowserReviewSession, LocationSuggestion, ReviewItem
 from .scan import MediaFile, scan_media
 
@@ -71,7 +72,9 @@ def build_organize_plan(
     unknown_place_reviewer: UnknownPlaceReviewer | None = None,
     place_identifier: OpenRouterPlaceIdentifier | None = None,
     place_identifications: Mapping[str, PlaceIdentification] | None = None,
+    progress: ProgressReporter | None = None,
 ) -> Plan:
+    progress = progress or ProgressReporter.disabled()
     if mode not in {"ongoing", "migration"}:
         raise ValueError("mode must be 'ongoing' or 'migration'")
     if transfer not in {"copy", "move"}:
@@ -83,17 +86,33 @@ def build_organize_plan(
         raise ValueError(f"organize source must be a directory: {source}")
     originals = library / "Originals"
     run_id = new_run_id(f"organize-{mode}")
-    files = scan_media(source, hash_files=False)
+    with progress.step(
+        f"Scanning {source} for media files",
+        done=lambda: f"Found {len(files)} media file(s)",
+    ):
+        files = scan_media(source, hash_files=False)
     operations: list[Operation] = []
 
     timestamped_files = []
-    for media in files:
-        if mode == "ongoing" and is_relative_to(media.path, originals):
-            continue
-        timestamped_files.append(media)
     timestamp_cache = metadata_cache_path(library)
-    timestamps = capture_timestamps([media.path for media in timestamped_files], cache_path=timestamp_cache)
-    bundles = build_media_bundles(source, timestamped_files, timestamps)
+    with progress.step(
+        "Filtering media that needs organizing",
+        done=lambda: f"Planning {len(timestamped_files)} media file(s)",
+    ):
+        for media in files:
+            if mode == "ongoing" and is_relative_to(media.path, originals):
+                continue
+            timestamped_files.append(media)
+    timestamps = capture_timestamps(
+        [media.path for media in timestamped_files],
+        cache_path=timestamp_cache,
+        progress=progress,
+    )
+    with progress.step(
+        "Bundling media into shoots",
+        done=lambda: f"Built {len(bundles)} bundle(s)",
+    ):
+        bundles = build_media_bundles(source, timestamped_files, timestamps)
 
     identifications = dict(place_identifications or {})
     if identify_places:
@@ -105,39 +124,44 @@ def build_organize_plan(
                 review_unknown_places=review_unknown_places,
                 review_ui=review_ui,
                 unknown_place_reviewer=unknown_place_reviewer,
+                progress=progress,
             )
         )
 
-    bundle_destinations = assign_bundle_destination_names(bundles, identifications)
-    for bundle in bundles:
-        country_name, folder_name = bundle_destinations[bundle.group_id]
-        for media in bundle.media:
-            captured = timestamps[media.path]
-            dest = originals / country_name / folder_name / media.path.name
-            place_identification = identifications.get(bundle.group_id)
-            operations.append(
-                Operation(
-                    type=transfer,
-                    src=str(media.path),
-                    dest=str(dest),
-                    reason=f"organize-{mode}",
-                    expected_size=media.size if transfer == "copy" else None,
-                    metadata={
-                        "bundle_id": bundle.group_id,
-                        "bundle_fallback_name": bundle.fallback_name,
-                        "timestamp_source": captured.source,
-                        "timestamp_raw": captured.raw,
-                        "capture_epoch": captured.epoch,
-                        "source_parent": str(bundle.source_parent),
-                        "identified_country_or_region": place_identification.country_or_region
-                        if place_identification
-                        else None,
-                        "identified_place_name": place_identification.place_name if place_identification else None,
-                        "identified_confidence": place_identification.confidence if place_identification else None,
-                        "identified_is_unknown": place_identification.is_unknown if place_identification else None,
-                    },
+    with progress.step(
+        "Building organize operations",
+        done=lambda: f"Planned {len(operations)} file operation(s)",
+    ):
+        bundle_destinations = assign_bundle_destination_names(bundles, identifications)
+        for bundle in bundles:
+            country_name, folder_name = bundle_destinations[bundle.group_id]
+            for media in bundle.media:
+                captured = timestamps[media.path]
+                dest = originals / country_name / folder_name / media.path.name
+                place_identification = identifications.get(bundle.group_id)
+                operations.append(
+                    Operation(
+                        type=transfer,
+                        src=str(media.path),
+                        dest=str(dest),
+                        reason=f"organize-{mode}",
+                        expected_size=media.size if transfer == "copy" else None,
+                        metadata={
+                            "bundle_id": bundle.group_id,
+                            "bundle_fallback_name": bundle.fallback_name,
+                            "timestamp_source": captured.source,
+                            "timestamp_raw": captured.raw,
+                            "capture_epoch": captured.epoch,
+                            "source_parent": str(bundle.source_parent),
+                            "identified_country_or_region": place_identification.country_or_region
+                            if place_identification
+                            else None,
+                            "identified_place_name": place_identification.place_name if place_identification else None,
+                            "identified_confidence": place_identification.confidence if place_identification else None,
+                            "identified_is_unknown": place_identification.is_unknown if place_identification else None,
+                        },
+                    )
                 )
-            )
 
     return make_plan(
         run_id=run_id,
@@ -298,24 +322,30 @@ def identify_bundle_places(
     review_unknown_places: bool = False,
     review_ui: bool = False,
     unknown_place_reviewer: UnknownPlaceReviewer | None = None,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, PlaceIdentification]:
+    progress = progress or ProgressReporter.disabled()
     if review_ui:
-        return identify_bundle_places_with_review_ui(bundles, timestamps, identifier=identifier)
+        return identify_bundle_places_with_review_ui(bundles, timestamps, identifier=identifier, progress=progress)
 
     identifier = identifier or OpenRouterPlaceIdentifier()
     preprocessor = ImagePreprocessor()
     reviewer = unknown_place_reviewer or review_unknown_place_interactively
     results: dict[str, PlaceIdentification] = {}
 
-    for bundle in bundles:
+    identifiable_bundles = [bundle for bundle in bundles if place_photo_candidates(bundle, timestamps)]
+    for index, bundle in enumerate(identifiable_bundles, start=1):
         photos = place_photo_candidates(bundle, timestamps)
-        if not photos:
-            continue
         try:
-            samples = select_place_identification_samples(photos)
-            prepared = [preprocessor.prepare(photo) for photo in samples]
-            identification = identifier.identify_prepared_images(bundle.group_id, prepared)
+            with progress.step(
+                f"Identifying place for bundle {index}/{len(identifiable_bundles)} ({bundle.group_id})",
+                done=lambda bundle=bundle: f"Identified place for {bundle.group_id}",
+            ):
+                samples = select_place_identification_samples(photos)
+                prepared = [preprocessor.prepare(photo) for photo in samples]
+                identification = identifier.identify_prepared_images(bundle.group_id, prepared)
         except ImagePreparationError:
+            progress.log(f"Skipped place identification for {bundle.group_id}; image preparation failed")
             continue
         if review_unknown_places and identification.is_unknown:
             identification = reviewer(identification, prepared)
@@ -329,7 +359,9 @@ def identify_bundle_places_with_review_ui(
     timestamps: Mapping[Path, object],
     *,
     identifier: OpenRouterPlaceIdentifier | None = None,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, PlaceIdentification]:
+    progress = progress or ProgressReporter.disabled()
     identifier = identifier or OpenRouterPlaceIdentifier()
     model_preprocessor = ImagePreprocessor()
     gallery_preprocessor = ImagePreprocessor(
@@ -340,20 +372,31 @@ def identify_bundle_places_with_review_ui(
     accepted: list[LocationSuggestion] = []
     base_prompt = load_place_identification_prompt()
 
+    progress.log(f"Opening browser review UI for {len(bundles)} bundle(s)")
     with BrowserReviewSession(total=len(bundles)) as session:
         for index, bundle in enumerate(bundles):
             photos = place_photo_candidates(bundle, timestamps)
             if not photos:
                 continue
             try:
-                samples = select_place_identification_samples(photos)
-                prepared_samples = [model_preprocessor.prepare(photo) for photo in samples]
-                prompt = place_prompt_with_context(base_prompt, accepted)
-                identification = identifier.identify_prepared_images(bundle.group_id, prepared_samples, prompt=prompt)
-                gallery_images = prepare_gallery_images(photos, gallery_preprocessor)
+                with progress.step(
+                    f"Preparing browser review item {index + 1}/{len(bundles)} ({bundle.group_id})",
+                    done=lambda bundle=bundle: f"Prepared browser review item for {bundle.group_id}",
+                ):
+                    samples = select_place_identification_samples(photos)
+                    prepared_samples = [model_preprocessor.prepare(photo) for photo in samples]
+                    prompt = place_prompt_with_context(base_prompt, accepted)
+                    identification = identifier.identify_prepared_images(
+                        bundle.group_id,
+                        prepared_samples,
+                        prompt=prompt,
+                    )
+                    gallery_images = prepare_gallery_images(photos, gallery_preprocessor)
             except ImagePreparationError:
+                progress.log(f"Skipped browser review item for {bundle.group_id}; image preparation failed")
                 continue
 
+            progress.log(f"Waiting for browser review {index + 1}/{len(bundles)} ({bundle.group_id})")
             reviewed = session.review(
                 ReviewItem(
                     identification=identification,
@@ -366,6 +409,9 @@ def identify_bundle_places_with_review_ui(
             )
             results[bundle.group_id] = reviewed
             add_location_suggestion(accepted, reviewed)
+            progress.log(
+                f"Accepted location for {bundle.group_id}: {reviewed.country_or_region} / {reviewed.place_name}"
+            )
 
     return results
 
