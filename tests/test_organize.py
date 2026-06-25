@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from curator.metadata import CaptureTimestamp
@@ -345,6 +346,7 @@ class OrganizeTests(unittest.TestCase):
         class FakeBrowserReviewSession:
             def __init__(self, total):
                 self.total = total
+                self.decisions = {}
 
             def __enter__(self):
                 return self
@@ -353,7 +355,11 @@ class OrganizeTests(unittest.TestCase):
                 return None
 
             def review(self, item, *, index):
+                self.decisions[reviewed.group_id] = reviewed
                 return reviewed
+
+            def finalize(self):
+                return SimpleNamespace(decisions=self.decisions)
 
         with patch("curator.organize.capture_timestamps", return_value={media: timestamp}):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
@@ -415,6 +421,7 @@ class OrganizeTests(unittest.TestCase):
         class FakeBrowserReviewSession:
             def __init__(self, total):
                 self.total = total
+                self.decisions = {}
 
             def __enter__(self):
                 return self
@@ -424,7 +431,7 @@ class OrganizeTests(unittest.TestCase):
 
             def review(self, item, *, index):
                 test_case.assertEqual(len(item.prepared_images), 2)
-                return PlaceIdentification(
+                reviewed = PlaceIdentification(
                     group_id=item.identification.group_id,
                     country_or_region="Costa Rica",
                     place_name="Manuel Antonio",
@@ -436,6 +443,11 @@ class OrganizeTests(unittest.TestCase):
                     sampled_paths=(),
                     raw_response={},
                 )
+                self.decisions[reviewed.group_id] = reviewed
+                return reviewed
+
+            def finalize(self):
+                return SimpleNamespace(decisions=self.decisions)
 
         with patch("curator.organize.capture_timestamps", return_value=timestamps):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
@@ -496,6 +508,7 @@ class OrganizeTests(unittest.TestCase):
         class FakeBrowserReviewSession:
             def __init__(self, total):
                 self.count = 0
+                self.decisions = {}
 
             def __enter__(self):
                 return self
@@ -506,7 +519,7 @@ class OrganizeTests(unittest.TestCase):
             def review(self, item, *, index):
                 self.count += 1
                 if self.count == 1:
-                    return PlaceIdentification(
+                    reviewed = PlaceIdentification(
                         group_id=item.identification.group_id,
                         country_or_region="Costa Rica",
                         place_name="La Fortuna Restaurant",
@@ -518,7 +531,13 @@ class OrganizeTests(unittest.TestCase):
                         sampled_paths=(),
                         raw_response={},
                     )
-                return item.identification
+                else:
+                    reviewed = item.identification
+                self.decisions[reviewed.group_id] = reviewed
+                return reviewed
+
+            def finalize(self):
+                return SimpleNamespace(decisions=self.decisions)
 
         with patch("curator.organize.capture_timestamps", return_value=timestamps):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):

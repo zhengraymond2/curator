@@ -49,18 +49,23 @@ class ReviewUiTests(unittest.TestCase):
 
         result = state.decide("Costa Rica", "Manuel Antonio")
 
-        self.assertTrue(result["done"])
+        self.assertTrue(result["final_review"])
         reviewed = state.decisions["103NCZ_6::01"]
         self.assertEqual(reviewed.country_or_region, "Costa Rica")
         self.assertEqual(reviewed.place_name, "Manuel Antonio")
         self.assertFalse(reviewed.is_unknown)
+        self.assertEqual(result["albums"][0]["place_name"], "Manuel Antonio")
+
+        approved = state.approve_final_review()
+
+        self.assertTrue(approved["done"])
 
     def test_review_state_accepts_country_and_place_in_single_location_field(self) -> None:
         state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
 
         result = state.decide("", "Guatemala/Antigua")
 
-        self.assertTrue(result["done"])
+        self.assertTrue(result["final_review"])
         reviewed = state.decisions["103NCZ_6::01"]
         self.assertEqual(reviewed.country_or_region, "Guatemala")
         self.assertEqual(reviewed.place_name, "Antigua")

@@ -30,16 +30,31 @@ class ReviewItem:
     context_summary: str = ""
 
 
+@dataclass(frozen=True)
+class ReviewedAlbum:
+    item: ReviewItem
+    decision: PlaceIdentification
+
+
+@dataclass(frozen=True)
+class FinalReviewResult:
+    decisions: dict[str, PlaceIdentification]
+
+
 class ReviewState:
     def __init__(self, items: Sequence[ReviewItem]) -> None:
         self.items = list(items)
         self.index = 0
         self.decisions: dict[str, PlaceIdentification] = {}
+        self.reviewed: list[ReviewedAlbum] = []
+        self.final_ready = False
         self.done = threading.Event()
         self.lock = threading.Lock()
 
     def payload(self) -> Mapping[str, object]:
         with self.lock:
+            if self.final_ready:
+                return final_review_payload(self.reviewed, self.index, len(self.items))
             if self.index >= len(self.items):
                 return {"done": True, "index": self.index, "total": len(self.items)}
             return review_item_payload(self.items[self.index], self.index, len(self.items))
@@ -67,11 +82,18 @@ class ReviewState:
                 rationale=f"User reviewed location: {country}/{place}",
             )
             self.decisions[original.group_id] = reviewed
+            self.reviewed.append(ReviewedAlbum(item=item, decision=reviewed))
             self.index += 1
             if self.index >= len(self.items):
-                self.done.set()
-                return {"done": True}
+                self.final_ready = True
+                return final_review_payload(self.reviewed, self.index, len(self.items))
             return review_item_payload(self.items[self.index], self.index, len(self.items))
+
+    def approve_final_review(self) -> Mapping[str, object]:
+        with self.lock:
+            self.final_ready = False
+            self.done.set()
+            return {"done": True, "index": self.index, "total": len(self.items)}
 
 
 def review_place_identifications_in_browser(
@@ -138,6 +160,9 @@ class BrowserReviewSession:
     def review(self, item: ReviewItem, *, index: int) -> PlaceIdentification:
         return self.state.review(item, index=index)
 
+    def finalize(self) -> FinalReviewResult:
+        return self.state.finalize()
+
 
 class SequentialReviewState:
     def __init__(self, total: int) -> None:
@@ -145,6 +170,9 @@ class SequentialReviewState:
         self.index = 0
         self.current: ReviewItem | None = None
         self.decision: PlaceIdentification | None = None
+        self.reviewed: list[ReviewedAlbum] = []
+        self.final_ready = False
+        self.final_done = threading.Event()
         self.item_ready = threading.Event()
         self.item_done = threading.Event()
         self.done = threading.Event()
@@ -167,6 +195,8 @@ class SequentialReviewState:
         with self.lock:
             if self.done.is_set():
                 return {"done": True, "index": self.index, "total": self.total}
+            if self.final_ready:
+                return final_review_payload(self.reviewed, self.index, self.total)
             if self.current is None:
                 return {"loading": True, "done": False, "index": self.index, "total": self.total}
             return review_item_payload(self.current, self.index, self.total)
@@ -191,16 +221,38 @@ class SequentialReviewState:
                 is_unknown=False if place and not place.casefold().startswith("unknown") else original.is_unknown,
                 rationale=f"User reviewed location: {country}/{place}",
             )
+            self.reviewed.append(ReviewedAlbum(item=item, decision=self.decision))
             self.current = None
             self.item_ready.clear()
             self.item_done.set()
             self.index += 1
             return {"loading": True, "done": False, "index": self.index, "total": self.total}
 
+    def finalize(self) -> FinalReviewResult:
+        with self.lock:
+            self.current = None
+            self.index = self.total
+            self.final_ready = True
+            self.item_ready.set()
+        self.final_done.wait()
+        with self.lock:
+            return FinalReviewResult(decisions={album.decision.group_id: album.decision for album in self.reviewed})
+
+    def approve_final_review(self) -> Mapping[str, object]:
+        with self.lock:
+            self.final_ready = False
+            self.done.set()
+            self.final_done.set()
+            self.item_ready.set()
+            self.item_done.set()
+            return {"done": True, "index": self.index, "total": self.total}
+
     def finish(self) -> None:
         with self.lock:
             self.current = None
+            self.final_ready = False
             self.done.set()
+            self.final_done.set()
             self.item_ready.set()
             self.item_done.set()
 
@@ -240,6 +292,46 @@ def review_item_payload(item: ReviewItem, index: int, total: int) -> Mapping[str
             for image in item.prepared_images
         ],
     }
+
+
+def final_review_payload(reviewed: Sequence[ReviewedAlbum], index: int, total: int) -> Mapping[str, object]:
+    albums: dict[tuple[str, str], dict[str, object]] = {}
+    for reviewed_album in reviewed:
+        decision = reviewed_album.decision
+        key = (decision.country_or_region, decision.place_name)
+        album = albums.setdefault(
+            key,
+            {
+                "key": album_key(*key),
+                "country_or_region": decision.country_or_region,
+                "place_name": decision.place_name,
+                "images": [],
+            },
+        )
+        images = album["images"]
+        assert isinstance(images, list)
+        for image in reviewed_album.item.prepared_images:
+            images.append(
+                {
+                    "src": image.data_url,
+                    "filename": image.source_path.name,
+                    "path": str(image.source_path),
+                    "group_id": decision.group_id,
+                    "prepared_size": image.prepared_size,
+                    "encoded_bytes": image.encoded_bytes,
+                }
+            )
+    return {
+        "done": False,
+        "final_review": True,
+        "index": index,
+        "total": total,
+        "albums": list(albums.values()),
+    }
+
+
+def album_key(country_or_region: str, place_name: str) -> str:
+    return f"{normalize_text(country_or_region)}\n{normalize_text(place_name)}"
 
 
 def resolve_location(
@@ -283,9 +375,14 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
             self.send_error(404)
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/final/approve":
+                self.send_json(state.approve_final_review())
+                return
+
             if self.path != "/api/decision":
                 self.send_error(404)
                 return
+
             length = int(self.headers.get("Content-Length", "0"))
             raw_body = self.rfile.read(length).decode("utf-8")
             try:
@@ -440,6 +537,41 @@ HTML = """<!doctype html>
       gap: 8px;
       align-content: start;
     }
+    .final-review {
+      display: block;
+      padding: 20px 18px 84px;
+    }
+    .final-review > h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+    }
+    .final-review > p {
+      margin: 0 0 18px;
+      color: var(--muted);
+    }
+    .album-section {
+      margin: 0 0 28px;
+    }
+    .album-heading {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 0 0 10px;
+    }
+    .album-heading h2 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .album-heading span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .final-actions {
+      display: flex;
+      justify-content: flex-end;
+      padding-top: 6px;
+    }
     figure {
       margin: 0;
       background: var(--panel);
@@ -550,6 +682,10 @@ HTML = """<!doctype html>
         document.body.innerHTML = '<div class="done"><h1>All groups reviewed</h1><p>You can return to the terminal.</p></div>';
         return;
       }
+      if (current.final_review) {
+        renderFinalReview();
+        return;
+      }
       if (current.loading) {
         let content;
         if (current.index == current.total) {
@@ -595,6 +731,72 @@ HTML = """<!doctype html>
       document.getElementById('place').focus();
       document.getElementById('place').select();
       renderSuggestions();
+    }
+
+    function renderFinalReview() {
+      document.body.innerHTML = '';
+      const main = document.createElement('main');
+      main.className = 'final-review';
+
+      const title = document.createElement('h1');
+      title.textContent = 'Final review';
+      main.appendChild(title);
+
+      const summary = document.createElement('p');
+      const albumCount = (current.albums || []).length;
+      summary.textContent = `${albumCount} album${albumCount === 1 ? '' : 's'} ready`;
+      main.appendChild(summary);
+
+      for (const album of current.albums || []) {
+        const section = document.createElement('section');
+        section.className = 'album-section';
+
+        const heading = document.createElement('div');
+        heading.className = 'album-heading';
+        const name = document.createElement('h2');
+        name.textContent = album.place_name || 'Untitled album';
+        const country = document.createElement('span');
+        country.textContent = album.country_or_region || 'Unsorted';
+        heading.appendChild(name);
+        heading.appendChild(country);
+        section.appendChild(heading);
+
+        const gallery = document.createElement('div');
+        gallery.className = 'gallery';
+        for (const image of album.images || []) {
+          const figure = document.createElement('figure');
+          const img = document.createElement('img');
+          img.src = image.src;
+          img.alt = image.filename;
+          const caption = document.createElement('figcaption');
+          caption.textContent = image.filename;
+          figure.appendChild(img);
+          figure.appendChild(caption);
+          gallery.appendChild(figure);
+        }
+        section.appendChild(gallery);
+        main.appendChild(section);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'final-actions';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Finish review';
+      button.addEventListener('click', approveFinalReview);
+      actions.appendChild(button);
+      main.appendChild(actions);
+      document.body.appendChild(main);
+    }
+
+    async function approveFinalReview() {
+      const response = await fetch('/api/final/approve', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}'
+      });
+      current = await response.json();
+      render();
     }
 
     async function submitDecision(place) {
@@ -704,7 +906,8 @@ HTML = """<!doctype html>
         activeSuggestion = null;
       }
       if (event.key === 'Enter') {
-        document.getElementById('review-form').requestSubmit();
+        const form = document.getElementById('review-form');
+        if (form) form.requestSubmit();
       }
     });
 

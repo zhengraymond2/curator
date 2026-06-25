@@ -413,6 +413,10 @@ def identify_bundle_places_with_review_ui(
                 f"Accepted location for {bundle.group_id}: {reviewed.country_or_region} / {reviewed.place_name}"
             )
 
+        progress.log("Waiting for final browser review approval")
+        final_review = session.finalize()
+        results = final_review.decisions
+
     return results
 
 
