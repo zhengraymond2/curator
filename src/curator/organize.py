@@ -99,6 +99,7 @@ def build_organize_plan(
     with progress.step(
         "Filtering media that needs organizing",
         done=lambda: f"Planning {len(timestamped_files)} media file(s)",
+        debug=True,
     ):
         for media in files:
             if mode == "ongoing" and is_relative_to(media.path, originals):
@@ -112,6 +113,7 @@ def build_organize_plan(
     with progress.step(
         "Bundling media into shoots",
         done=lambda: f"Built {len(bundles)} bundle(s)",
+        debug=True,
     ):
         bundles = build_media_bundles(source, timestamped_files, timestamps)
 
@@ -383,6 +385,7 @@ def identify_bundle_places_with_review_ui(
                 with progress.step(
                     f"Preparing browser review item {index + 1}/{len(bundles)} ({bundle.group_id})",
                     done=lambda bundle=bundle: f"Prepared browser review item for {bundle.group_id}",
+                    debug=True,
                 ):
                     samples = select_place_identification_samples(photos)
                     prepared_samples = [model_preprocessor.prepare(photo) for photo in samples]
@@ -400,7 +403,7 @@ def identify_bundle_places_with_review_ui(
                 progress.log(f"Skipped browser review item for {bundle.group_id}; image preparation failed")
                 continue
 
-            progress.log(f"Waiting for browser review {index + 1}/{len(bundles)} ({bundle.group_id})")
+            progress.log(f"Waiting for browser review {index + 1}/{len(bundles)} ({bundle.group_id})", debug=True)
             reviewed = session.review(
                 ReviewItem(
                     identification=pending_place_identification(bundle, prepared_samples),
@@ -415,7 +418,8 @@ def identify_bundle_places_with_review_ui(
             results[bundle.group_id] = reviewed
             add_location_suggestion(accepted, reviewed)
             progress.log(
-                f"Accepted location for {bundle.group_id}: {reviewed.country_or_region} / {reviewed.place_name}"
+                f"Accepted location for {bundle.group_id}: {reviewed.country_or_region} / {reviewed.place_name}",
+                debug=True,
             )
 
     return results

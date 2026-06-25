@@ -63,9 +63,7 @@ DRY_RUN_FILE="${DRY_RUN_FILE:-DRYRUN2.txt}"
 
 echo "Curator review dry-run"
 echo "  source:       $SOURCE_DIR"
-echo "  library root: $LIBRARY_ROOT"
 echo "  dry-run file: $DRY_RUN_FILE"
-echo "  python:       $PYTHON_BIN"
 
 cd "$ROOT_DIR"
 "$PYTHON_BIN" -m curator organize \

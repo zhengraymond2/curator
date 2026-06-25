@@ -175,6 +175,7 @@ def capture_timestamps(
         with progress.step(
             f"Reading metadata for {len(remaining)} file(s)",
             done=lambda: f"Exiftool matched {len(timestamps) - before} file(s)",
+            debug=True,
         ):
             for path, tag, value in exiftool_capture_dates(remaining):
                 parsed = parse_exif_date(value)
@@ -190,6 +191,7 @@ def capture_timestamps(
         with progress.step(
             f"Reading image metadata with sips for {len(image_paths)} file(s)",
             done=lambda: f"Sips matched {len(timestamps) - before} file(s)",
+            debug=True,
         ):
             for path, value in sips_creation_dates(image_paths).items():
                 parsed = parse_exif_date(value)
