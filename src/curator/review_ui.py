@@ -482,6 +482,7 @@ HTML = """<!doctype html>
       --line: #d7d4cc;
       --accent: #0f766e;
       --accent-ink: #ffffff;
+      --success: #15803d;
       --panel: #ffffff;
     }
     * { box-sizing: border-box; }
@@ -636,9 +637,17 @@ HTML = """<!doctype html>
       font-size: 13px;
     }
     .final-actions {
-      display: flex;
-      justify-content: flex-end;
-      padding-top: 6px;
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 10;
+    }
+    .looks-good {
+      min-width: 128px;
+      border-color: var(--success);
+      background: var(--success);
+      color: #fff;
+      box-shadow: 0 12px 28px rgba(21, 128, 61, 0.25);
     }
     figure {
       margin: 0;
@@ -860,7 +869,8 @@ HTML = """<!doctype html>
       actions.className = 'final-actions';
       const button = document.createElement('button');
       button.type = 'button';
-      button.textContent = 'Finish review';
+      button.className = 'looks-good';
+      button.textContent = 'Looks good';
       button.addEventListener('click', approveFinalReview);
       actions.appendChild(button);
       main.appendChild(actions);

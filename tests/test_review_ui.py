@@ -85,6 +85,8 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('id="place"', HTML)
         self.assertIn('placeholder="Location or album name"', HTML)
         self.assertIn('Edit folder name', HTML)
+        self.assertIn('Looks good', HTML)
+        self.assertIn('position: fixed', HTML)
 
 
 if __name__ == "__main__":
