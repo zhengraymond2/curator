@@ -95,6 +95,12 @@ class ReviewState:
             self.done.set()
             return {"done": True, "index": self.index, "total": len(self.items)}
 
+    def rename_album(self, target_key: str, folder_name: str) -> Mapping[str, object]:
+        with self.lock:
+            rename_reviewed_album(self.reviewed, target_key, folder_name)
+            self.decisions = reviewed_decisions(self.reviewed)
+            return final_review_payload(self.reviewed, self.index, len(self.items))
+
 
 def review_place_identifications_in_browser(
     items: Sequence[ReviewItem],
@@ -247,6 +253,11 @@ class SequentialReviewState:
             self.item_done.set()
             return {"done": True, "index": self.index, "total": self.total}
 
+    def rename_album(self, target_key: str, folder_name: str) -> Mapping[str, object]:
+        with self.lock:
+            rename_reviewed_album(self.reviewed, target_key, folder_name)
+            return final_review_payload(self.reviewed, self.index, self.total)
+
     def finish(self) -> None:
         with self.lock:
             self.current = None
@@ -330,6 +341,40 @@ def final_review_payload(reviewed: Sequence[ReviewedAlbum], index: int, total: i
     }
 
 
+def reviewed_decisions(reviewed: Sequence[ReviewedAlbum]) -> dict[str, PlaceIdentification]:
+    return {album.decision.group_id: album.decision for album in reviewed}
+
+
+def rename_reviewed_album(reviewed: list[ReviewedAlbum], target_key: str, folder_name: str) -> None:
+    for index, reviewed_album in enumerate(reviewed):
+        decision = reviewed_album.decision
+        if album_key(decision.country_or_region, decision.place_name) != target_key:
+            continue
+        country, place = resolve_album_name(folder_name, decision)
+        reviewed[index] = ReviewedAlbum(
+            item=reviewed_album.item,
+            decision=replace(
+                decision,
+                country_or_region=country,
+                place_name=place,
+                confidence=1.0,
+                is_unknown=False if place and not place.casefold().startswith("unknown") else decision.is_unknown,
+                rationale=f"User renamed final album: {country}/{place}",
+            ),
+        )
+
+
+def resolve_album_name(folder_name: str, original: PlaceIdentification) -> tuple[str, str]:
+    value = folder_name.strip()
+    if "/" in value:
+        country, _, place = value.partition("/")
+        country = country.strip()
+        place = place.strip()
+        if country and place:
+            return country, place
+    return original.country_or_region, value or original.place_name
+
+
 def album_key(country_or_region: str, place_name: str) -> str:
     return f"{normalize_text(country_or_region)}\n{normalize_text(place_name)}"
 
@@ -379,7 +424,7 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
                 self.send_json(state.approve_final_review())
                 return
 
-            if self.path != "/api/decision":
+            if self.path not in {"/api/decision", "/api/final/album"}:
                 self.send_error(404)
                 return
 
@@ -389,6 +434,14 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
                 payload = json.loads(raw_body or "{}")
             except json.JSONDecodeError:
                 self.send_error(400, "invalid JSON")
+                return
+            if self.path == "/api/final/album":
+                self.send_json(
+                    state.rename_album(
+                        str(payload.get("album_key") or ""),
+                        str(payload.get("place_name") or ""),
+                    )
+                )
                 return
             self.send_json(
                 state.decide(
@@ -560,6 +613,21 @@ HTML = """<!doctype html>
     }
     .album-heading h2 {
       margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .album-name {
+      cursor: text;
+      border-bottom: 1px dashed transparent;
+    }
+    .album-name:hover,
+    .album-name:focus {
+      border-bottom-color: var(--accent);
+      color: var(--accent);
+    }
+    .album-name-input {
+      max-width: min(560px, 100%);
+      height: 34px;
       font-size: 18px;
       font-weight: 650;
     }
@@ -754,7 +822,17 @@ HTML = """<!doctype html>
         const heading = document.createElement('div');
         heading.className = 'album-heading';
         const name = document.createElement('h2');
+        name.className = 'album-name';
+        name.tabIndex = 0;
+        name.title = 'Edit folder name';
         name.textContent = album.place_name || 'Untitled album';
+        name.addEventListener('click', () => editAlbumName(album, name));
+        name.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            editAlbumName(album, name);
+          }
+        });
         const country = document.createElement('span');
         country.textContent = album.country_or_region || 'Unsorted';
         heading.appendChild(name);
@@ -787,6 +865,50 @@ HTML = """<!doctype html>
       actions.appendChild(button);
       main.appendChild(actions);
       document.body.appendChild(main);
+    }
+
+    function editAlbumName(album, nameNode) {
+      const input = document.createElement('input');
+      input.className = 'album-name-input';
+      input.value = album.place_name || '';
+      let finished = false;
+
+      async function save() {
+        if (finished) return;
+        finished = true;
+        await renameAlbum(album.key, input.value);
+      }
+
+      function cancel() {
+        if (finished) return;
+        finished = true;
+        renderFinalReview();
+      }
+
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          save();
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cancel();
+        }
+      });
+      input.addEventListener('blur', save);
+      nameNode.replaceWith(input);
+      input.focus();
+      input.select();
+    }
+
+    async function renameAlbum(albumKey, placeName) {
+      const response = await fetch('/api/final/album', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({album_key: albumKey, place_name: placeName})
+      });
+      current = await response.json();
+      render();
     }
 
     async function approveFinalReview() {

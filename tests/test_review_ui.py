@@ -70,10 +70,21 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(reviewed.country_or_region, "Guatemala")
         self.assertEqual(reviewed.place_name, "Antigua")
 
+    def test_review_state_renames_final_album(self) -> None:
+        state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
+        result = state.decide("Costa Rica", "Manuel Antonio")
+        album_key = result["albums"][0]["key"]
+
+        renamed = state.rename_album(str(album_key), "Corcovado")
+
+        self.assertEqual(renamed["albums"][0]["place_name"], "Corcovado")
+        self.assertEqual(state.decisions["103NCZ_6::01"].place_name, "Corcovado")
+
     def test_review_html_uses_single_location_textbox(self) -> None:
         self.assertNotIn('id="country"', HTML)
         self.assertIn('id="place"', HTML)
         self.assertIn('placeholder="Location or album name"', HTML)
+        self.assertIn('Edit folder name', HTML)
 
 
 if __name__ == "__main__":
