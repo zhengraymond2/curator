@@ -99,6 +99,10 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('id="place"', HTML)
         self.assertIn('placeholder="Location or album name"', HTML)
 
+    def test_review_html_offers_create_new_album_suggestion(self) -> None:
+        self.assertIn("Create New Album:", HTML)
+        self.assertIn("createNewAlbum", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

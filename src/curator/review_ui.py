@@ -481,6 +481,9 @@ HTML = """<!doctype html>
     .suggestion.active {
       background: #e8f3f1;
     }
+    .suggestion.create-new {
+      border-top: 1px solid var(--line);
+    }
     .suggestion strong { font-size: 14px; }
     .suggestion span { color: var(--muted); font-size: 12px; }
     main {
@@ -602,6 +605,7 @@ HTML = """<!doctype html>
     let activeSuggestion = null;
     let lastGroupId = null;
     let placeDirty = false;
+    let createNewAlbum = false;
 
     async function loadState() {
       const response = await fetch('/api/state');
@@ -627,6 +631,7 @@ HTML = """<!doctype html>
       if (current.loading) {
         lastGroupId = null;
         placeDirty = false;
+        createNewAlbum = false;
         let content;
         if (current.index == current.total) {
           content = "Finished";
@@ -650,6 +655,7 @@ HTML = """<!doctype html>
         lastGroupId = current.group_id;
         placeDirty = false;
         activeSuggestion = null;
+        createNewAlbum = false;
       }
       document.getElementById('progress').textContent = `Group ${current.index + 1} / ${current.total}`;
       const placeInput = document.getElementById('place');
@@ -702,7 +708,7 @@ HTML = """<!doctype html>
         country = typedLocation.country;
         place = typedLocation.place;
       }
-      if (activeSuggestion && normalize(place) !== normalize(current.place_name)) {
+      if (!createNewAlbum && activeSuggestion && normalize(place) !== normalize(current.place_name)) {
         country = activeSuggestion.country_or_region;
         place = activeSuggestion.place_name;
       }
@@ -756,23 +762,26 @@ HTML = """<!doctype html>
 
     function renderSuggestions() {
       const root = document.getElementById('suggestions');
-      if (!current || !current.suggestions || !current.suggestions.length) {
+      if (!current) {
         root.hidden = true;
         activeSuggestion = null;
+        createNewAlbum = false;
         return;
       }
       const query = document.getElementById('place').value;
-      const ranked = current.suggestions
+      createNewAlbum = false;
+      const ranked = (current.suggestions || [])
         .map((suggestion) => ({suggestion, score: fuzzyScore(query, suggestion)}))
         .filter((item) => item.score >= 0)
         .sort((a, b) => b.score - a.score || a.suggestion.place_name.localeCompare(b.suggestion.place_name))
         .slice(0, 8);
-      if (!ranked.length) {
+      const newAlbumName = query.trim();
+      if (!ranked.length && !newAlbumName) {
         root.hidden = true;
         activeSuggestion = null;
         return;
       }
-      activeSuggestion = ranked[0].suggestion;
+      activeSuggestion = ranked.length ? ranked[0].suggestion : null;
       root.innerHTML = '';
       ranked.forEach((item, index) => {
         const div = document.createElement('div');
@@ -781,11 +790,30 @@ HTML = """<!doctype html>
         div.addEventListener('mousedown', (event) => {
           event.preventDefault();
           activeSuggestion = item.suggestion;
+          createNewAlbum = false;
           document.getElementById('place').value = item.suggestion.place_name;
           root.hidden = true;
         });
         root.appendChild(div);
       });
+      if (newAlbumName) {
+        const create = document.createElement('div');
+        create.className = 'suggestion create-new';
+        const label = document.createElement('strong');
+        label.textContent = `Create New Album: ${newAlbumName}`;
+        const detail = document.createElement('span');
+        detail.textContent = current.country_or_region || '';
+        create.appendChild(label);
+        create.appendChild(detail);
+        create.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          activeSuggestion = null;
+          createNewAlbum = true;
+          document.getElementById('place').value = newAlbumName;
+          root.hidden = true;
+        });
+        root.appendChild(create);
+      }
       root.hidden = false;
     }
 
@@ -804,6 +832,7 @@ HTML = """<!doctype html>
       if (event.key === 'Escape') {
         document.getElementById('suggestions').hidden = true;
         activeSuggestion = null;
+        createNewAlbum = false;
       }
       if (event.key === 'Enter') {
         document.getElementById('review-form').requestSubmit();
