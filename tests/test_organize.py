@@ -463,6 +463,105 @@ class OrganizeTests(unittest.TestCase):
 
         self.assertEqual(len(plan.operations), 2)
 
+    def test_review_ui_final_image_moves_split_bundle_destinations(self) -> None:
+        case = unique_case_dir("organize-review-ui-image-move")
+        source = case / "CRG" / "103NCZ_6"
+        library = case / "library"
+        media_a = source / "DSC_0001.NEF"
+        media_b = source / "DSC_0002.NEF"
+        media_a.parent.mkdir(parents=True)
+        media_a.write_bytes(b"a")
+        media_b.write_bytes(b"b")
+        timestamps = {
+            media_a: CaptureTimestamp(epoch=1000.0, source="test"),
+            media_b: CaptureTimestamp(epoch=1010.0, source="test"),
+        }
+        guess = PlaceIdentification(
+            group_id="103NCZ_6::01",
+            country_or_region="Unsorted",
+            place_name="unknown beach",
+            confidence=0.2,
+            is_unknown=True,
+            rationale="test",
+            visual_evidence=(),
+            alternate_guesses=(),
+            sampled_paths=(),
+            raw_response={},
+        )
+        manuel = PlaceIdentification(
+            group_id="103NCZ_6::01",
+            country_or_region="Costa Rica",
+            place_name="Manuel Antonio",
+            confidence=1.0,
+            is_unknown=False,
+            rationale="user",
+            visual_evidence=(),
+            alternate_guesses=(),
+            sampled_paths=(),
+            raw_response={},
+        )
+        corcovado = PlaceIdentification(
+            group_id="103NCZ_6::01",
+            country_or_region="Costa Rica",
+            place_name="Corcovado",
+            confidence=1.0,
+            is_unknown=False,
+            rationale="user moved image",
+            visual_evidence=(),
+            alternate_guesses=(),
+            sampled_paths=(),
+            raw_response={},
+        )
+
+        class FakeIdentifier:
+            def identify_prepared_images(self, group_id, prepared_images, prompt=None):
+                return guess
+
+        class FakePreprocessor:
+            def prepare(self, photo):
+                return PreparedImage(
+                    source_path=photo.path,
+                    data_url="data:image/jpeg;base64,anBlZw==",
+                    captured_at=None,
+                    encoded_bytes=4,
+                    original_size=(10, 10),
+                    prepared_size=(10, 10),
+                )
+
+        class FakeBrowserReviewSession:
+            def __init__(self, total):
+                self.total = total
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def review(self, item, *, index):
+                return manuel
+
+            def finalize(self):
+                return SimpleNamespace(
+                    decisions={manuel.group_id: manuel},
+                    image_locations={str(media_a): manuel, str(media_b): corcovado},
+                )
+
+        with patch("curator.organize.capture_timestamps", return_value=timestamps):
+            with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
+                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                    plan = build_organize_plan(
+                        case / "CRG",
+                        library,
+                        mode="migration",
+                        identify_places=True,
+                        review_ui=True,
+                        place_identifier=FakeIdentifier(),
+                    )
+
+        parents = {__import__("pathlib").Path(operation.dest).parent.name for operation in plan.operations}
+        self.assertEqual(parents, {"Manuel Antonio", "Corcovado"})
+
     def test_review_ui_context_flows_to_next_model_prompt(self) -> None:
         case = unique_case_dir("organize-review-ui-context")
         library = case / "library"
