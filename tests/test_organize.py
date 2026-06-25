@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import patch
 
 from curator.metadata import CaptureTimestamp
 from curator.organize import build_organize_plan
 from curator.place_identification import OpenRouterError, PlaceIdentification, PreparedImage
+from curator.review_ui import SequentialReviewState, review_item_payload
 
 from tests.helpers import unique_case_dir
 
@@ -345,6 +347,7 @@ class OrganizeTests(unittest.TestCase):
         class FakeBrowserReviewSession:
             def __init__(self, total):
                 self.total = total
+                self.state = SequentialReviewState(total)
 
             def __enter__(self):
                 return self
@@ -415,6 +418,7 @@ class OrganizeTests(unittest.TestCase):
         class FakeBrowserReviewSession:
             def __init__(self, total):
                 self.total = total
+                self.state = SequentialReviewState(total)
 
             def __enter__(self):
                 return self
@@ -451,6 +455,93 @@ class OrganizeTests(unittest.TestCase):
 
         self.assertEqual(len(plan.operations), 2)
 
+    def test_review_ui_does_not_wait_for_llm_result_before_reviewing(self) -> None:
+        case = unique_case_dir("organize-review-ui-async")
+        source = case / "CRG" / "103NCZ_6"
+        library = case / "library"
+        media = source / "DSC_0001.NEF"
+        media.parent.mkdir(parents=True)
+        media.write_bytes(b"fake raw")
+        timestamp = CaptureTimestamp(epoch=1000.0, source="test")
+        started = threading.Event()
+        release = threading.Event()
+        returned = threading.Event()
+
+        class FakeIdentifier:
+            def identify_prepared_images(self, group_id, prepared_images, prompt=None):
+                started.set()
+                release.wait(timeout=2)
+                returned.set()
+                return PlaceIdentification(
+                    group_id=group_id,
+                    country_or_region="Unsorted",
+                    place_name="unknown beach",
+                    confidence=0.2,
+                    is_unknown=True,
+                    rationale="test",
+                    visual_evidence=(),
+                    alternate_guesses=(),
+                    sampled_paths=(),
+                    raw_response={},
+                )
+
+        class FakePreprocessor:
+            def prepare(self, photo):
+                return PreparedImage(
+                    source_path=photo.path,
+                    data_url="data:image/jpeg;base64,anBlZw==",
+                    captured_at=None,
+                    encoded_bytes=4,
+                    original_size=(10, 10),
+                    prepared_size=(10, 10),
+                )
+
+        test_case = self
+
+        class FakeBrowserReviewSession:
+            def __init__(self, total):
+                self.state = SequentialReviewState(total)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                release.set()
+                return None
+
+            def review(self, item, *, index):
+                test_case.assertTrue(started.wait(timeout=1))
+                test_case.assertFalse(returned.is_set())
+                payload = review_item_payload(item, index=index, total=1, llm_data=self.state.llm_data)
+                test_case.assertTrue(payload["llm_loading"])
+                release.set()
+                return PlaceIdentification(
+                    group_id=item.identification.group_id,
+                    country_or_region="Costa Rica",
+                    place_name="Manuel Antonio",
+                    confidence=1.0,
+                    is_unknown=False,
+                    rationale="user",
+                    visual_evidence=(),
+                    alternate_guesses=(),
+                    sampled_paths=(),
+                    raw_response={},
+                )
+
+        with patch("curator.organize.capture_timestamps", return_value={media: timestamp}):
+            with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
+                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                    plan = build_organize_plan(
+                        case / "CRG",
+                        library,
+                        mode="migration",
+                        identify_places=True,
+                        review_ui=True,
+                        place_identifier=FakeIdentifier(),
+                    )
+
+        self.assertIn("/Originals/Costa Rica/Manuel Antonio/DSC_0001.NEF", str(plan.operations[0].dest))
+
     def test_review_ui_context_flows_to_next_model_prompt(self) -> None:
         case = unique_case_dir("organize-review-ui-context")
         library = case / "library"
@@ -465,10 +556,13 @@ class OrganizeTests(unittest.TestCase):
             media_b: CaptureTimestamp(epoch=2000.0, source="test"),
         }
         prompts = []
+        second_prompt_seen = threading.Event()
 
         class FakeIdentifier:
             def identify_prepared_images(self, group_id, prepared_images, prompt=None):
                 prompts.append(prompt or "")
+                if len(prompts) >= 2:
+                    second_prompt_seen.set()
                 return PlaceIdentification(
                     group_id=group_id,
                     country_or_region="Unsorted",
@@ -496,6 +590,7 @@ class OrganizeTests(unittest.TestCase):
         class FakeBrowserReviewSession:
             def __init__(self, total):
                 self.count = 0
+                self.state = SequentialReviewState(total)
 
             def __enter__(self):
                 return self
@@ -532,6 +627,7 @@ class OrganizeTests(unittest.TestCase):
                         place_identifier=FakeIdentifier(),
                     )
 
+        self.assertTrue(second_prompt_seen.wait(timeout=1))
         self.assertEqual(len(prompts), 2)
         self.assertIn("Costa Rica", prompts[1])
         self.assertIn("La Fortuna Restaurant", prompts[1])
