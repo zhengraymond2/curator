@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .checksums import sha256_file
 from .plan import Operation, Plan, utc_now_iso
+from .progress import ProgressReporter
 
 
 class SafetyError(RuntimeError):
@@ -29,7 +30,13 @@ def _ensure_destination_available(path: Path) -> None:
         raise SafetyError(f"refusing to overwrite existing destination: {path}")
 
 
-def apply_plan(plan: Plan, *, log_root: Path | None = None) -> list[dict[str, object]]:
+def apply_plan(
+    plan: Plan,
+    *,
+    log_root: Path | None = None,
+    progress: ProgressReporter | None = None,
+) -> list[dict[str, object]]:
+    progress = progress or ProgressReporter.disabled()
     results: list[dict[str, object]] = []
     log_handle = None
     if log_root is not None:
@@ -39,14 +46,18 @@ def apply_plan(plan: Plan, *, log_root: Path | None = None) -> list[dict[str, ob
         log_handle = log_path.open("w", encoding="utf-8")
 
     try:
-        for operation in plan.operations:
-            result = apply_operation(operation)
-            result["time"] = utc_now_iso()
-            result["run_id"] = plan.run_id
-            results.append(result)
-            if log_handle is not None:
-                log_handle.write(json.dumps(result, sort_keys=True) + "\n")
-                log_handle.flush()
+        with progress.step(
+            f"Applying {len(plan.operations)} operation(s)",
+            done=lambda: f"Applied {len(results)} operation(s)",
+        ):
+            for operation in plan.operations:
+                result = apply_operation(operation)
+                result["time"] = utc_now_iso()
+                result["run_id"] = plan.run_id
+                results.append(result)
+                if log_handle is not None:
+                    log_handle.write(json.dumps(result, sort_keys=True) + "\n")
+                    log_handle.flush()
     finally:
         if log_handle is not None:
             log_handle.close()
@@ -108,4 +119,3 @@ def apply_operation(operation: Operation) -> dict[str, object]:
         return {"op": "move", "src": str(src), "dest": str(dest), "reason": operation.reason}
 
     raise SafetyError(f"unsupported operation type: {operation.type}")
-

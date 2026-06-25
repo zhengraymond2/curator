@@ -11,6 +11,7 @@ from .dryrun import write_dryrun_file
 from .ingest import build_ingest_plan
 from .organize import build_organize_plan
 from .plan import Plan, read_plan, write_plan
+from .progress import ProgressReporter
 from .safety import SafetyError, apply_plan
 
 
@@ -112,13 +113,21 @@ def add_plan_apply_args(parser: argparse.ArgumentParser) -> None:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    plan = build_ingest_plan(args.source, args.dest, name=args.name)
-    return handle_generated_plan(plan, args, default_log_root=args.dest / ".curator" / "logs", notify=True)
+    progress = cli_progress()
+    plan = build_ingest_plan(args.source, args.dest, name=args.name, progress=progress)
+    return handle_generated_plan(
+        plan,
+        args,
+        default_log_root=args.dest / ".curator" / "logs",
+        notify=True,
+        progress=progress,
+    )
 
 
 def cmd_organize(args: argparse.Namespace) -> int:
     if args.dry_mode and args.apply:
         raise ValueError("--dry-mode cannot be combined with --apply")
+    progress = cli_progress()
     plan = build_organize_plan(
         args.source,
         args.library,
@@ -127,6 +136,7 @@ def cmd_organize(args: argparse.Namespace) -> int:
         identify_places=args.identify_places or args.review_ui,
         review_unknown_places=args.review_unknown_places,
         review_ui=args.review_ui,
+        progress=progress,
     )
     if args.dry_mode:
         if args.plan:
@@ -137,12 +147,18 @@ def cmd_organize(args: argparse.Namespace) -> int:
         print(f"Wrote dry-run hierarchy: {dryrun_path}")
         print("No copy/move operations were applied.")
         return 0
-    return handle_generated_plan(plan, args, default_log_root=args.library / ".curator" / "logs")
+    return handle_generated_plan(plan, args, default_log_root=args.library / ".curator" / "logs", progress=progress)
 
 
 def cmd_dedupe(args: argparse.Namespace) -> int:
-    plan = build_dedupe_plan(args.root, args.trash, library=args.library)
-    return handle_generated_plan(plan, args, default_log_root=args.trash.parent / ".curator" / "logs")
+    progress = cli_progress()
+    plan = build_dedupe_plan(args.root, args.trash, library=args.library, progress=progress)
+    return handle_generated_plan(
+        plan,
+        args,
+        default_log_root=args.trash.parent / ".curator" / "logs",
+        progress=progress,
+    )
 
 
 def handle_generated_plan(
@@ -151,6 +167,7 @@ def handle_generated_plan(
     *,
     default_log_root: Path,
     notify: bool = False,
+    progress: ProgressReporter | None = None,
 ) -> int:
     if args.plan:
         write_plan(plan, args.plan)
@@ -163,7 +180,7 @@ def handle_generated_plan(
         print("Dry run only. Re-run with --apply or use `curator apply PLAN` to mutate files.")
         return 0
 
-    results = apply_plan(plan, log_root=default_log_root)
+    results = apply_plan(plan, log_root=default_log_root, progress=progress)
     print(f"Applied {len(results)} operation(s).")
     if plan.metadata.get("kind") == "ingest":
         print("Checksum verification: PASSED")
@@ -185,8 +202,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
-    plan = read_plan(args.path)
-    results = apply_plan(plan, log_root=args.log_root)
+    progress = cli_progress()
+    with progress.step(f"Reading plan from {args.path}", done=f"Read plan from {args.path}"):
+        plan = read_plan(args.path)
+    results = apply_plan(plan, log_root=args.log_root, progress=progress)
     print(plan.summary())
     print(f"Applied {len(results)} operation(s).")
     return 0
@@ -210,3 +229,7 @@ def play_done_sound() -> None:
     sound = Path("/System/Library/Sounds/Glass.aiff")
     if sound.exists():
         subprocess.run(["afplay", str(sound)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def cli_progress() -> ProgressReporter:
+    return ProgressReporter(stream=sys.stderr)
