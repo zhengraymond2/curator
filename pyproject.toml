@@ -8,10 +8,20 @@ version = "0.1.0"
 description = "Power-user photo and video file management CLI."
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+raw = [
+    "rawpy>=0.21.0",
+]
 
 [project.scripts]
 curator = "curator.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+curator = ["prompts/*.txt"]

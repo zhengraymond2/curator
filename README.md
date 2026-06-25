@@ -56,3 +56,21 @@ PYTHONPATH=src python3 -m curator organize --mode migration --transfer copy --so
 Add `--apply` only after reviewing the generated plan.
 
 `--dry-mode` writes a fake destination hierarchy to `SOURCE/DRYRUN.txt` and applies no copy/move operations.
+
+## LLM Place Identification
+
+The agentic place-identification stage lives in `curator.place_identification`. It samples
+1-2 photos from each group, preferring the pair with the most different capture timestamps,
+downsamples them into compact JPEG data URLs, then sends them to OpenRouter.
+
+Default model: `openai/gpt-5.4-mini`.
+
+The prompt is checked in at `src/curator/prompts/prompt_001_identify_place.txt` and tells
+the model to use an `unknown XYZ` fallback when the location evidence is weak.
+
+Create a local `.env` file for the OpenRouter token:
+
+```sh
+cp .env.example .env
+# then edit .env and set OPENROUTER_API_KEY
+```
