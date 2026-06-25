@@ -249,8 +249,15 @@ def resolve_location(
     original: PlaceIdentification,
     suggestions: Sequence[LocationSuggestion],
 ) -> tuple[str, str]:
-    country = (country_or_region or "").strip() or original.country_or_region
-    place = (place_name or "").strip() or original.place_name
+    country = (country_or_region or "").strip()
+    place = (place_name or "").strip()
+    if not country and "/" in place:
+        parsed_country, _, parsed_place = place.partition("/")
+        if parsed_country.strip() and parsed_place.strip():
+            country = parsed_country.strip()
+            place = parsed_place.strip()
+    country = country or original.country_or_region
+    place = place or original.place_name
 
     normalized_country = normalize_text(country)
     normalized_place = normalize_text(place)
@@ -365,7 +372,7 @@ HTML = """<!doctype html>
     }
     form {
       display: grid;
-      grid-template-columns: minmax(140px, 220px) minmax(220px, 1fr) auto;
+      grid-template-columns: minmax(220px, 1fr) auto;
       gap: 8px;
       align-items: center;
     }
@@ -497,9 +504,8 @@ HTML = """<!doctype html>
       <div id="progress"></div>
     </div>
     <form id="review-form">
-      <input id="country" autocomplete="off" placeholder="Country or region">
       <div class="place-wrap">
-        <input id="place" autocomplete="off" placeholder="Place or album name">
+        <input id="place" autocomplete="off" placeholder="Location or album name">
         <div class="suggestions" id="suggestions" hidden></div>
       </div>
       <button class="primary" type="submit">Save / Continue</button>
@@ -564,7 +570,6 @@ HTML = """<!doctype html>
         return;
       }
       document.getElementById('progress').textContent = `Group ${current.index + 1} / ${current.total}`;
-      document.getElementById('country').value = current.country_or_region || '';
       document.getElementById('place').value = current.place_name || '';
       document.getElementById('group').textContent = current.group_id;
       document.getElementById('file-count').textContent = current.file_count;
@@ -592,7 +597,13 @@ HTML = """<!doctype html>
       renderSuggestions();
     }
 
-    async function submitDecision(country, place) {
+    async function submitDecision(place) {
+      let country = current.country_or_region || '';
+      const typedLocation = splitLocation(place);
+      if (typedLocation) {
+        country = typedLocation.country;
+        place = typedLocation.place;
+      }
       if (activeSuggestion && normalize(place) !== normalize(current.place_name)) {
         country = activeSuggestion.country_or_region;
         place = activeSuggestion.place_name;
@@ -610,12 +621,21 @@ HTML = """<!doctype html>
       return (value || '').trim().toLocaleLowerCase();
     }
 
+    function splitLocation(value) {
+      const parts = (value || '').split('/');
+      if (parts.length < 2) return null;
+      const country = parts[0].trim();
+      const place = parts.slice(1).join('/').trim();
+      if (!country || !place) return null;
+      return {country, place};
+    }
+
     function fuzzyScore(query, suggestion) {
       const q = normalize(query);
       const label = normalize(`${suggestion.country_or_region}/${suggestion.place_name}`);
       const place = normalize(suggestion.place_name);
       const country = normalize(suggestion.country_or_region);
-      const countryInput = normalize(document.getElementById('country').value);
+      const countryInput = normalize(current && current.country_or_region);
       if (!q) return country === countryInput ? 40 : 10;
       let score = 0;
       if (country === countryInput) score += 60;
@@ -663,7 +683,6 @@ HTML = """<!doctype html>
         div.addEventListener('mousedown', (event) => {
           event.preventDefault();
           activeSuggestion = item.suggestion;
-          document.getElementById('country').value = item.suggestion.country_or_region;
           document.getElementById('place').value = item.suggestion.place_name;
           root.hidden = true;
         });
@@ -674,14 +693,10 @@ HTML = """<!doctype html>
 
     document.getElementById('review-form').addEventListener('submit', (event) => {
       event.preventDefault();
-      submitDecision(
-        document.getElementById('country').value,
-        document.getElementById('place').value
-      );
+      submitDecision(document.getElementById('place').value);
     });
 
     document.getElementById('place').addEventListener('input', renderSuggestions);
-    document.getElementById('country').addEventListener('input', renderSuggestions);
 
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from curator.place_identification import PlaceIdentification, PreparedImage
-from curator.review_ui import ReviewItem, ReviewState, review_item_payload
+from curator.review_ui import HTML, ReviewItem, ReviewState, review_item_payload
 
 
 def sample_identification() -> PlaceIdentification:
@@ -55,7 +55,21 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(reviewed.place_name, "Manuel Antonio")
         self.assertFalse(reviewed.is_unknown)
 
+    def test_review_state_accepts_country_and_place_in_single_location_field(self) -> None:
+        state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
+
+        result = state.decide("", "Guatemala/Antigua")
+
+        self.assertTrue(result["done"])
+        reviewed = state.decisions["103NCZ_6::01"]
+        self.assertEqual(reviewed.country_or_region, "Guatemala")
+        self.assertEqual(reviewed.place_name, "Antigua")
+
+    def test_review_html_uses_single_location_textbox(self) -> None:
+        self.assertNotIn('id="country"', HTML)
+        self.assertIn('id="place"', HTML)
+        self.assertIn('placeholder="Location or album name"', HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
-
