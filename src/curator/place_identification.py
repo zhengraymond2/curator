@@ -70,6 +70,7 @@ PLACE_RESPONSE_SCHEMA: Mapping[str, Any] = {
             "additionalProperties": False,
             "properties": {
                 "place_name": {"type": "string"},
+                "country_or_region": {"type": "string"},
                 "confidence": {"type": "number"},
                 "is_unknown": {"type": "boolean"},
                 "rationale": {"type": "string"},
@@ -84,6 +85,7 @@ PLACE_RESPONSE_SCHEMA: Mapping[str, Any] = {
             },
             "required": [
                 "place_name",
+                "country_or_region",
                 "confidence",
                 "is_unknown",
                 "rationale",
@@ -130,6 +132,7 @@ class PreparedImage:
 @dataclass(frozen=True)
 class PlaceIdentification:
     group_id: str
+    country_or_region: str
     place_name: str
     confidence: float
     is_unknown: bool
@@ -390,6 +393,7 @@ class OpenRouterPlaceIdentifier:
 
         return PlaceIdentification(
             group_id=group_id,
+            country_or_region=str(parsed["country_or_region"]),
             place_name=str(parsed["place_name"]),
             confidence=float(parsed["confidence"]),
             is_unknown=bool(parsed["is_unknown"]),
@@ -490,6 +494,7 @@ class OpenRouterPlaceIdentifier:
 
         required = {
             "place_name",
+            "country_or_region",
             "confidence",
             "is_unknown",
             "rationale",

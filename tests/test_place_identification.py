@@ -54,6 +54,7 @@ class CapturingTransport:
                     "message": {
                         "content": json.dumps(
                             {
+                                "country_or_region": "Unsorted",
                                 "place_name": "unknown park",
                                 "confidence": 0.35,
                                 "is_unknown": True,
@@ -104,6 +105,7 @@ class PlaceIdentificationTests(unittest.TestCase):
         result = identifier.identify_prepared_images("group-a", prepared)
 
         self.assertEqual(result.place_name, "unknown park")
+        self.assertEqual(result.country_or_region, "Unsorted")
         self.assertEqual(transport.payload["model"], "openai/gpt-5.4-mini")
         content = transport.payload["messages"][0]["content"]
         self.assertEqual(content[0]["type"], "text")

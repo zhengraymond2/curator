@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/review-dryrun SOURCE_DIR [extra curator organize args...]
+
+Runs Curator's reviewed dry-mode organizer against SOURCE_DIR.
+
+Defaults:
+  library root: test/review-dryrun-library
+  preview file: DRYRUN2.txt
+
+Environment overrides:
+  LIBRARY_ROOT=/path/to/library
+  DRY_RUN_FILE=DRYRUN3.txt
+  PYTHON_BIN=/path/to/python3
+
+Examples:
+  ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
+  DRY_RUN_FILE=DRYRUN3.txt ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 64
+fi
+
+SOURCE_DIR="$1"
+shift
+
+if [[ ! -d "$SOURCE_DIR" ]]; then
+  echo "Source directory does not exist: $SOURCE_DIR" >&2
+  exit 66
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_PYTHON="/Users/rzheng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
+PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    echo "Could not find python3. Set PYTHON_BIN=/path/to/python3 and try again." >&2
+    exit 69
+  fi
+fi
+
+LIBRARY_ROOT="${LIBRARY_ROOT:-$ROOT_DIR/test/review-dryrun-library}"
+DRY_RUN_FILE="${DRY_RUN_FILE:-DRYRUN2.txt}"
+
+echo "Curator review dry-run"
+echo "  source:       $SOURCE_DIR"
+echo "  library root: $LIBRARY_ROOT"
+echo "  dry-run file: $DRY_RUN_FILE"
+echo "  python:       $PYTHON_BIN"
+
+cd "$ROOT_DIR"
+PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m curator organize \
+  --mode migration \
+  --transfer copy \
+  --source "$SOURCE_DIR" \
+  --library "$LIBRARY_ROOT" \
+  --review-ui \
+  --dry-mode \
+  --dry-run-file "$DRY_RUN_FILE" \
+  "$@"

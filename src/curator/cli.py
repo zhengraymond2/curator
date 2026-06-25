@@ -56,6 +56,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write SOURCE/DRYRUN.txt with the planned folder hierarchy and do not apply changes",
     )
+    organize.add_argument(
+        "--dry-run-file",
+        default="DRYRUN.txt",
+        help="filename to write inside SOURCE when --dry-mode is used",
+    )
+    organize.add_argument(
+        "--identify-places",
+        action="store_true",
+        help="use OpenRouter image analysis to name bundled folders",
+    )
+    organize.add_argument(
+        "--review-unknown-places",
+        action="store_true",
+        help="when place identification is unknown, open a sample gallery and prompt for a location",
+    )
+    organize.add_argument(
+        "--review-ui",
+        action="store_true",
+        help="open a local browser UI to review every place-identified bundle",
+    )
     add_plan_apply_args(organize)
     organize.set_defaults(func=cmd_organize)
 
@@ -99,12 +119,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 def cmd_organize(args: argparse.Namespace) -> int:
     if args.dry_mode and args.apply:
         raise ValueError("--dry-mode cannot be combined with --apply")
-    plan = build_organize_plan(args.source, args.library, mode=args.mode, transfer=args.transfer)
+    plan = build_organize_plan(
+        args.source,
+        args.library,
+        mode=args.mode,
+        transfer=args.transfer,
+        identify_places=args.identify_places or args.review_ui,
+        review_unknown_places=args.review_unknown_places,
+        review_ui=args.review_ui,
+    )
     if args.dry_mode:
         if args.plan:
             write_plan(plan, args.plan)
             print(f"Wrote plan: {args.plan}")
-        dryrun_path = write_dryrun_file(plan, args.source)
+        dryrun_path = write_dryrun_file(plan, args.source, filename=args.dry_run_file)
         print(plan.summary())
         print(f"Wrote dry-run hierarchy: {dryrun_path}")
         print("No copy/move operations were applied.")

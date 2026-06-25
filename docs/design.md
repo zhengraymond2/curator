@@ -214,10 +214,25 @@ Important options:
 --library PATH
 --plan PATH
 --dry-mode
+--dry-run-file NAME
+--identify-places
+--review-unknown-places
+--review-ui
 --apply
 ```
 
-`--dry-mode` writes a human-readable fake destination hierarchy to `SOURCE/DRYRUN.txt` and performs no copy/move operations. It is intentionally incompatible with `--apply`.
+`--dry-mode` writes a human-readable fake destination hierarchy to `SOURCE/DRYRUN.txt` and performs no copy/move operations. `--dry-run-file` can write a second preview such as `DRYRUN2.txt`. It is intentionally incompatible with `--apply`.
+
+`--identify-places` samples up to two images from each bundled folder, sends those samples to the OpenRouter place-identification stage, and uses the returned `country_or_region` and `place_name` to name planned destination folders.
+
+`--review-unknown-places` makes unknown model results interactive: Curator opens the sampled images in a macOS Quick Look gallery, the user closes it with Esc, and then enters a corrected location in the CLI.
+
+`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. The page shows the model guess, a country textbox, a place textbox, all prepared images in the bundle, confidence, rationale, and visible evidence. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle. When all bundles are reviewed, Curator writes the requested dry-run file.
+
+The review UI keeps a list of previously entered places and uses it in two ways:
+
+- The place field offers case-insensitive fuzzy suggestions. Selecting or exactly retyping an existing place reuses the same destination folder.
+- Each reviewed location is appended to the context for later model prompts. The most recent country/region is treated as the active context, so a user-entered country switch such as `Guatemala` makes later prompts prefer Guatemala context rather than older Costa Rica context.
 
 Example `DRYRUN.txt`:
 
@@ -386,8 +401,9 @@ Initial grouping should happen within folder boundaries.
 Rules:
 
 - Sort media files in a folder by capture timestamp.
-- Start a new shoot when the gap between adjacent files exceeds 15 minutes.
+- Start a new shoot when the gap between adjacent files exceeds 60 minutes.
 - Do not merge groups across folders in the initial implementation.
+- Do not let a bundle skip over an existing filename in the same folder. In filename order, each bundle must be a contiguous run of existing files, so `DSC_0001`, `DSC_0002`, and `DSC_0007` cannot be bundled together when `DSC_0004` exists between them.
 - Deduplication remains global across all scanned files.
 
 This respects camera clock drift because photos with wrong clocks are usually still grouped naturally inside their original folder structure.

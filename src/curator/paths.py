@@ -14,6 +14,12 @@ def safe_component(value: str, fallback: str = "Untitled") -> str:
     return cleaned or fallback
 
 
+def safe_human_component(value: str, fallback: str = "Untitled") -> str:
+    cleaned = SAFE_COMPONENT_RE.sub(" ", value).strip(" .-_")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or fallback
+
+
 def trash_name_for_path(path: Path) -> str:
     parts = [safe_component(part, "root") for part in path.resolve().parts if part not in ("/", "")]
     return "__".join(parts)
@@ -40,4 +46,3 @@ def is_relative_to(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
-
