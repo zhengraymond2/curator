@@ -75,7 +75,9 @@ class ReviewState:
         self.final_validation_message = ""
         self.final_validation_summary = ""
         self.final_validation_details = ""
+        self.final_validation_dryrun_path = ""
         self.final_validation_seen = threading.Event()
+        self.commit_requested = threading.Event()
         self.done = threading.Event()
         self.lock = threading.Lock()
 
@@ -88,6 +90,7 @@ class ReviewState:
                     message=self.final_validation_message,
                     summary=self.final_validation_summary,
                     details=self.final_validation_details,
+                    dryrun_path=self.final_validation_dryrun_path,
                     index=self.index,
                     total=len(self.items),
                 )
@@ -257,11 +260,12 @@ class ReviewState:
         with self.lock:
             if self.wait_for_final_validation:
                 self.final_ready = False
-                self.final_validation_status = "pending"
-                self.final_validation_title = "Copying and validating"
-                self.final_validation_message = "Curator is copying files, then checking checksums, file totals, and filenames."
+                self.final_validation_status = "staging"
+                self.final_validation_title = "Preparing commit"
+                self.final_validation_message = "Curator is writing DRYRUN.txt in the source folder."
                 self.final_validation_summary = ""
                 self.final_validation_details = ""
+                self.final_validation_dryrun_path = ""
                 self.final_validation_seen.clear()
                 self.done.set()
                 return final_validation_payload(
@@ -270,6 +274,7 @@ class ReviewState:
                     message=self.final_validation_message,
                     summary=self.final_validation_summary,
                     details=self.final_validation_details,
+                    dryrun_path=self.final_validation_dryrun_path,
                     index=self.index,
                     total=len(self.items),
                 )
@@ -285,6 +290,37 @@ class ReviewState:
             self.final_validation_summary = ""
             self.final_validation_details = ""
             self.final_validation_seen.clear()
+
+    def ready_to_commit(self, dryrun_path: Path) -> None:
+        with self.lock:
+            self.final_validation_status = "ready"
+            self.final_validation_title = "Ready to commit"
+            self.final_validation_message = "DRYRUN.txt is staged in the source folder. Click Commit to copy into the destination."
+            self.final_validation_summary = ""
+            self.final_validation_details = ""
+            self.final_validation_dryrun_path = str(dryrun_path)
+            self.final_validation_seen.clear()
+
+    def request_commit(self) -> Mapping[str, object]:
+        with self.lock:
+            if self.final_validation_status == "ready":
+                self.final_validation_status = "pending"
+                self.final_validation_title = "Copying and validating"
+                self.final_validation_message = "Curator is copying files, then checking checksums, file totals, and filenames."
+                self.final_validation_summary = ""
+                self.final_validation_details = ""
+                self.final_validation_seen.clear()
+                self.commit_requested.set()
+            return final_validation_payload(
+                status=self.final_validation_status or "pending",
+                title=self.final_validation_title,
+                message=self.final_validation_message,
+                summary=self.final_validation_summary,
+                details=self.final_validation_details,
+                dryrun_path=self.final_validation_dryrun_path,
+                index=self.index,
+                total=len(self.items),
+            )
 
     def complete_final_validation(
         self,
@@ -360,6 +396,12 @@ class FinalValidationReporter:
 
     def start(self, message: str) -> None:
         self.state.start_final_validation(message)
+
+    def ready_to_commit(self, dryrun_path: Path) -> None:
+        self.state.ready_to_commit(dryrun_path)
+
+    def wait_for_commit(self) -> None:
+        self.state.commit_requested.wait()
 
     def succeed(self, summary: str) -> None:
         self.state.complete_final_validation(
@@ -840,6 +882,7 @@ def final_validation_payload(
     message: str,
     summary: str,
     details: str,
+    dryrun_path: str,
     index: int,
     total: int,
 ) -> Mapping[str, object]:
@@ -851,6 +894,7 @@ def final_validation_payload(
         "validation_message": message,
         "validation_summary": summary,
         "validation_details": details,
+        "validation_dryrun_path": dryrun_path,
         "index": index,
         "total": total,
     }
@@ -1085,6 +1129,9 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             if self.path == "/api/final/approve":
                 self.send_json(state.approve_final_review())
+                return
+            if self.path == "/api/final/commit":
+                self.send_json(state.request_commit())
                 return
 
             if self.path not in {"/api/decision", "/api/final/album", "/api/final/move"}:
@@ -1697,7 +1744,7 @@ HTML = """<!doctype html>
         closeExpandedImage(false);
         resetGalleryObserver();
         renderFinalValidation();
-        if (current.validation_status === 'pending') {
+        if (current.validation_status === 'staging' || current.validation_status === 'pending') {
           setTimeout(loadState, 900);
         }
         return;
@@ -2139,7 +2186,11 @@ HTML = """<!doctype html>
 
       const statusLine = document.createElement('div');
       statusLine.className = 'validation-status';
-      if (status === 'pending') {
+      if (status === 'staging') {
+        statusLine.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Writing DRYRUN.txt...</span>';
+      } else if (status === 'ready') {
+        statusLine.textContent = 'Staged and ready';
+      } else if (status === 'pending') {
         statusLine.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Waiting for CLI validation...</span>';
       } else if (status === 'passed') {
         statusLine.textContent = 'All final checks passed';
@@ -2147,6 +2198,25 @@ HTML = """<!doctype html>
         statusLine.textContent = 'Do not delete the original source folder';
       }
       panel.appendChild(statusLine);
+
+      if (current.validation_dryrun_path) {
+        const dryrun = document.createElement('pre');
+        dryrun.className = 'validation-output';
+        dryrun.textContent = current.validation_dryrun_path;
+        panel.appendChild(dryrun);
+      }
+
+      if (status === 'ready') {
+        const actions = document.createElement('div');
+        actions.className = 'final-actions';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'looks-good';
+        button.textContent = 'Commit';
+        button.addEventListener('click', commitFinalReview);
+        actions.appendChild(button);
+        main.appendChild(actions);
+      }
 
       if (current.validation_summary) {
         const summary = document.createElement('pre');
@@ -2409,6 +2479,16 @@ HTML = """<!doctype html>
 
     async function approveFinalReview() {
       const response = await fetch('/api/final/approve', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}'
+      });
+      current = await response.json();
+      render();
+    }
+
+    async function commitFinalReview() {
+      const response = await fetch('/api/final/commit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: '{}'

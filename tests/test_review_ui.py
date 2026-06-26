@@ -134,8 +134,20 @@ class ReviewUiTests(unittest.TestCase):
         approved = state.approve_final_review()
 
         self.assertTrue(approved["final_validation"])
-        self.assertEqual(approved["validation_status"], "pending")
+        self.assertEqual(approved["validation_status"], "staging")
         self.assertTrue(state.done.is_set())
+
+        dryrun_path = Path("/Volumes/Dest/DRYRUN.txt")
+        state.ready_to_commit(dryrun_path)
+        ready = state.payload()
+
+        self.assertEqual(ready["validation_status"], "ready")
+        self.assertEqual(ready["validation_dryrun_path"], str(dryrun_path))
+
+        committed = state.request_commit()
+
+        self.assertEqual(committed["validation_status"], "pending")
+        self.assertTrue(state.commit_requested.is_set())
 
         state.complete_final_validation(
             success=False,
@@ -210,6 +222,9 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('Move to...', HTML)
         self.assertIn('Deselect', HTML)
         self.assertIn('renderFinalValidation', HTML)
+        self.assertIn('commitFinalReview', HTML)
+        self.assertIn('Writing DRYRUN.txt', HTML)
+        self.assertIn('Commit', HTML)
         self.assertIn('Waiting for CLI validation', HTML)
         self.assertIn('Do not delete the original source folder', HTML)
         self.assertIn('album-select-checkbox', HTML)

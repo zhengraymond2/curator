@@ -233,9 +233,6 @@ def handle_generated_plan(
 ) -> int:
     validation_reporter = plan.runtime.get("review_validation_reporter")
     try:
-        if validation_reporter is not None:
-            validation_reporter.start("Curator is writing the plan before copying files.")
-
         if args.plan:
             write_plan(plan, args.plan)
             print(f"Wrote plan: {args.plan}")
@@ -246,6 +243,15 @@ def handle_generated_plan(
         if not args.apply:
             print("Dry run only. Re-run with --apply or use `curator apply PLAN` to mutate files.")
             return 0
+
+        if validation_reporter is not None and plan.metadata.get("kind") == "organize" and plan.metadata.get("transfer") == "copy":
+            source_value = plan.metadata.get("source")
+            if not isinstance(source_value, str):
+                raise ValueError("organize plan missing source metadata")
+            dryrun_path = write_dryrun_file(plan, Path(source_value))
+            print(f"Wrote dry-run hierarchy: {dryrun_path}")
+            validation_reporter.ready_to_commit(dryrun_path)
+            validation_reporter.wait_for_commit()
 
         if validation_reporter is not None:
             validation_reporter.start("Curator is copying files, then checking checksums, file totals, and filenames.")
