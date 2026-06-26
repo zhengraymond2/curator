@@ -40,6 +40,17 @@ class ProgressReporterTests(unittest.TestCase):
         self.assertIn("[curator] Starting: Visible work", output)
         self.assertIn("[curator] Done: Visible result", output)
 
+    def test_step_update_changes_default_done_message(self) -> None:
+        stream = io.StringIO()
+        reporter = ProgressReporter(stream=stream)
+
+        with reporter.step("Working (0/2)") as step:
+            step.update("Working (2/2)")
+
+        output = stream.getvalue()
+        self.assertIn("[curator] Starting: Working (0/2)", output)
+        self.assertIn("[curator] Done: Working (2/2)", output)
+
 
 if __name__ == "__main__":
     unittest.main()

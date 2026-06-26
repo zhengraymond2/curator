@@ -523,7 +523,7 @@ def start_llm_identification(
             return
 
         state.store_llm_result(identification)
-        progress.log(f"LLM place identification ready for {group_id}")
+        progress.log(f"LLM place identification ready for {group_id}", debug=True)
 
     thread = threading.Thread(
         target=identify,

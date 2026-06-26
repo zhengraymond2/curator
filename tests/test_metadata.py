@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import unittest
 from unittest.mock import patch
 
 from curator.metadata import capture_timestamps, parse_exif_date, parse_mdls_date
+from curator.progress import ProgressReporter
 
 from tests.helpers import unique_case_dir
 
@@ -82,6 +84,26 @@ class MetadataTests(unittest.TestCase):
 
         exiftool.assert_called_once()
         self.assertEqual(refreshed[media].raw, "2027:06:25 04:32:10")
+
+    def test_capture_timestamps_reports_metadata_progress(self) -> None:
+        case = unique_case_dir("metadata-progress")
+        first = case / "DSC_0001.JPG"
+        second = case / "DSC_0002.JPG"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        first.write_bytes(b"fake jpg 1")
+        second.write_bytes(b"fake jpg 2")
+        stream = io.StringIO()
+        progress = ProgressReporter(stream=stream, debug_enabled=False)
+
+        with patch("curator.metadata.exiftool_capture_dates", return_value=[]):
+            with patch("curator.metadata.sips_creation_dates", return_value={}):
+                with patch("curator.metadata.mdls_content_creation_dates", return_value={}):
+                    timestamps = capture_timestamps([first, second], progress=progress)
+
+        self.assertEqual(set(timestamps), {first, second})
+        output = stream.getvalue()
+        self.assertIn("[curator] Starting: Processing metadata... (0/2 files processed)", output)
+        self.assertIn("[curator] Done: Processing metadata... (2/2 files processed)", output)
 
 
 if __name__ == "__main__":

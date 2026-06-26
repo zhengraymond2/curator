@@ -11,6 +11,21 @@ from typing import Callable, Iterator, TextIO, Union
 ProgressMessage = Union[str, Callable[[], str]]
 
 
+class ProgressStep:
+    def __init__(self, spinner: _Spinner | None = None, message: str = "") -> None:
+        self._spinner = spinner
+        self._message = message
+
+    @property
+    def message(self) -> str:
+        return self._message
+
+    def update(self, message: str) -> None:
+        self._message = message
+        if self._spinner is not None:
+            self._spinner.update(message)
+
+
 class ProgressReporter:
     def __init__(
         self,
@@ -43,20 +58,21 @@ class ProgressReporter:
         done: ProgressMessage | None = None,
         failed: ProgressMessage | None = None,
         debug: bool = False,
-    ) -> Iterator[None]:
+    ) -> Iterator[ProgressStep]:
         if not self.enabled or (debug and not self.debug_enabled):
-            yield
+            yield ProgressStep(message=message)
             return
 
         spinner = _Spinner(self.stream, self._lock, message)
+        step = ProgressStep(spinner, message)
         spinner.start()
         try:
-            yield
+            yield step
         except Exception:
-            spinner.stop("Failed", _resolve_message(failed) or message)
+            spinner.stop("Failed", _resolve_message(failed) or step.message)
             raise
         else:
-            spinner.stop("Done", _resolve_message(done) or message)
+            spinner.stop("Done", _resolve_message(done) or step.message)
 
 
 class _Spinner:
@@ -92,13 +108,18 @@ class _Spinner:
             self.stream.write(f"[curator] {status}: {message} ({elapsed:.1f}s)\n")
             self.stream.flush()
 
+    def update(self, message: str) -> None:
+        with self.lock:
+            self.message = message
+
     def _spin(self) -> None:
         frames = "|/-\\"
         index = 0
         while not self._stop.is_set():
             elapsed = time.monotonic() - self.start_time
             with self.lock:
-                self.stream.write(f"\r[curator] {frames[index % len(frames)]} {self.message} ({elapsed:.1f}s)")
+                message = self.message
+                self.stream.write(f"\r[curator] {frames[index % len(frames)]} {message} ({elapsed:.1f}s)")
                 self.stream.flush()
             index += 1
             self._stop.wait(0.1)

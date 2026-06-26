@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from .progress import ProgressReporter
 
@@ -146,6 +147,40 @@ def capture_timestamps(
     progress: ProgressReporter | None = None,
 ) -> dict[Path, CaptureTimestamp]:
     progress = progress or ProgressReporter.disabled()
+    unique_paths = list(dict.fromkeys(paths))
+    if not unique_paths:
+        return {}
+
+    processed_paths: set[Path] = set()
+    metadata_step = None
+
+    def progress_message() -> str:
+        return f"Processing metadata... ({len(processed_paths)}/{len(unique_paths)} files processed)"
+
+    def mark_processed(path: Path) -> None:
+        if path in processed_paths:
+            return
+        processed_paths.add(path)
+        if metadata_step is not None:
+            metadata_step.update(progress_message())
+
+    with progress.step(progress_message(), done=progress_message, failed=progress_message) as step:
+        metadata_step = step
+        return _capture_timestamps(
+            unique_paths,
+            cache_path=cache_path,
+            progress=progress,
+            on_timestamp=mark_processed,
+        )
+
+
+def _capture_timestamps(
+    paths: list[Path],
+    *,
+    cache_path: Path | None,
+    progress: ProgressReporter,
+    on_timestamp: Callable[[Path], None],
+) -> dict[Path, CaptureTimestamp]:
     timestamps: dict[Path, CaptureTimestamp] = {}
     remaining = list(paths)
     cache = MetadataTimestampCache.load(cache_path) if cache_path is not None else None
@@ -166,21 +201,29 @@ def capture_timestamps(
             if cached is not None:
                 timestamps[path] = cached
                 cached_paths.add(path)
+                on_timestamp(path)
         remaining = [path for path in remaining if path not in timestamps]
         if not remaining:
             return finish()
 
     if remaining:
         before = len(timestamps)
+
+        def handle_exiftool_result(path: Path, tag: str, value: str) -> None:
+            if path in timestamps:
+                return
+            parsed = parse_exif_date(value)
+            if parsed is not None:
+                timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source=f"exiftool:{tag}", raw=value)
+                on_timestamp(path)
+
         with progress.step(
             f"Reading metadata for {len(remaining)} file(s)",
             done=lambda: f"Exiftool matched {len(timestamps) - before} file(s)",
             debug=True,
         ):
-            for path, tag, value in exiftool_capture_dates(remaining):
-                parsed = parse_exif_date(value)
-                if parsed is not None:
-                    timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source=f"exiftool:{tag}", raw=value)
+            for path, tag, value in exiftool_capture_dates(remaining, on_result=handle_exiftool_result):
+                handle_exiftool_result(path, tag, value)
     remaining = [path for path in remaining if path not in timestamps]
     if not remaining:
         return finish()
@@ -188,31 +231,46 @@ def capture_timestamps(
     image_paths = [path for path in remaining if path.suffix.casefold() in IMAGE_METADATA_EXTENSIONS]
     if image_paths:
         before = len(timestamps)
+
+        def handle_sips_result(path: Path, value: str) -> None:
+            if path in timestamps:
+                return
+            parsed = parse_exif_date(value)
+            if parsed is not None:
+                timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="sips:creation", raw=value)
+                on_timestamp(path)
+
         with progress.step(
             f"Reading image metadata with sips for {len(image_paths)} file(s)",
             done=lambda: f"Sips matched {len(timestamps) - before} file(s)",
             debug=True,
         ):
-            for path, value in sips_creation_dates(image_paths).items():
-                parsed = parse_exif_date(value)
-                if parsed is not None:
-                    timestamps[path] = CaptureTimestamp(epoch=parsed.timestamp(), source="sips:creation", raw=value)
+            for path, value in sips_creation_dates(image_paths, on_result=handle_sips_result).items():
+                handle_sips_result(path, value)
     remaining = [path for path in remaining if path not in timestamps]
     if not remaining:
         return finish()
 
     if remaining:
         before = len(timestamps)
+
+        def handle_mdls_result(path: Path, value: str) -> None:
+            if path in timestamps:
+                return
+            parsed = parse_mdls_date(value)
+            if parsed is not None:
+                timestamps[path] = CaptureTimestamp(
+                    epoch=parsed.timestamp(), source="mdls:kMDItemContentCreationDate", raw=value
+                )
+                on_timestamp(path)
+
         with progress.step(
             f"Reading Spotlight metadata with mdls for {len(remaining)} file(s)",
             done=lambda: f"Mdls matched {len(timestamps) - before} file(s)",
+            debug=True,
         ):
-            for path, value in mdls_content_creation_dates(remaining).items():
-                parsed = parse_mdls_date(value)
-                if parsed is not None:
-                    timestamps[path] = CaptureTimestamp(
-                        epoch=parsed.timestamp(), source="mdls:kMDItemContentCreationDate", raw=value
-                    )
+            for path, value in mdls_content_creation_dates(remaining, on_result=handle_mdls_result).items():
+                handle_mdls_result(path, value)
     remaining = [path for path in remaining if path not in timestamps]
     if not remaining:
         return finish()
@@ -221,9 +279,11 @@ def capture_timestamps(
         with progress.step(
             f"Using filesystem modified times for {len(remaining)} file(s)",
             done=lambda: f"Used filesystem modified times for {len(remaining)} file(s)",
+            debug=True,
         ):
             for path in remaining:
                 timestamps[path] = CaptureTimestamp(epoch=path.stat().st_mtime, source="filesystem_mtime")
+                on_timestamp(path)
 
     return finish()
 
@@ -235,13 +295,21 @@ def exiftool_capture_date(path: Path) -> tuple[str, str] | None:
     return None
 
 
-def exiftool_capture_dates(paths: list[Path]) -> list[tuple[Path, str, str]]:
+def exiftool_capture_dates(
+    paths: list[Path],
+    *,
+    on_result: Callable[[Path, str, str], None] | None = None,
+) -> list[tuple[Path, str, str]]:
     if not paths or shutil.which("exiftool") is None:
         return []
 
     results: list[tuple[Path, str, str]] = []
     for chunk in chunks(paths, COMMAND_CHUNK_SIZE):
-        results.extend(_exiftool_capture_dates_chunk(chunk))
+        chunk_results = _exiftool_capture_dates_chunk(chunk)
+        results.extend(chunk_results)
+        if on_result is not None:
+            for path, tag, value in chunk_results:
+                on_result(path, tag, value)
     return results
 
 
@@ -289,13 +357,21 @@ def sips_creation_date(path: Path) -> str | None:
     return sips_creation_dates([path]).get(path)
 
 
-def sips_creation_dates(paths: list[Path]) -> dict[Path, str]:
+def sips_creation_dates(
+    paths: list[Path],
+    *,
+    on_result: Callable[[Path, str], None] | None = None,
+) -> dict[Path, str]:
     if not paths or shutil.which("sips") is None:
         return {}
 
     results: dict[Path, str] = {}
     for chunk in chunks(paths, COMMAND_CHUNK_SIZE):
-        results.update(_sips_creation_dates_chunk(chunk))
+        chunk_results = _sips_creation_dates_chunk(chunk)
+        results.update(chunk_results)
+        if on_result is not None:
+            for path, value in chunk_results.items():
+                on_result(path, value)
     return results
 
 
@@ -334,13 +410,21 @@ def mdls_content_creation_date(path: Path) -> str | None:
     return mdls_content_creation_dates([path]).get(path)
 
 
-def mdls_content_creation_dates(paths: list[Path]) -> dict[Path, str]:
+def mdls_content_creation_dates(
+    paths: list[Path],
+    *,
+    on_result: Callable[[Path, str], None] | None = None,
+) -> dict[Path, str]:
     if not paths or shutil.which("mdls") is None:
         return {}
 
     results: dict[Path, str] = {}
     for chunk in chunks(paths, COMMAND_CHUNK_SIZE):
-        results.update(_mdls_content_creation_dates_chunk(chunk))
+        chunk_results = _mdls_content_creation_dates_chunk(chunk)
+        results.update(chunk_results)
+        if on_result is not None:
+            for path, value in chunk_results.items():
+                on_result(path, value)
     return results
 
 
