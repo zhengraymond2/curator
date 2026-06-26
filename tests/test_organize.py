@@ -159,7 +159,7 @@ class OrganizeTests(unittest.TestCase):
                         place_identifier=FakeIdentifier(),
                     )
 
-    def test_organize_keeps_same_identified_place_separate_across_source_folders(self) -> None:
+    def test_organize_merges_same_identified_place_across_source_folders(self) -> None:
         case = unique_case_dir("organize-folder-boundaries")
         library = case / "library"
         media_a = case / "CRG" / "103NCZ_6" / "DSC_0001.NEF"
@@ -197,9 +197,8 @@ class OrganizeTests(unittest.TestCase):
             )
 
         parents = {str(__import__("pathlib").Path(operation.dest).parent) for operation in plan.operations}
-        self.assertEqual(len(parents), 2)
+        self.assertEqual(parents, {str(library / "Originals" / "Italy" / "Rome")})
         self.assertIn(str(library / "Originals" / "Italy" / "Rome"), parents)
-        self.assertIn(str(library / "Originals" / "Italy" / "Rome - 104NCZ_6"), parents)
 
     def test_organize_filename_adjacency_prevents_skipping_existing_names(self) -> None:
         case = unique_case_dir("organize-name-adjacency")

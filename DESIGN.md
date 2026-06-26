@@ -493,7 +493,9 @@ Originals/
     Human-Friendly-Place/
 ```
 
-If the same place appears more than once, add enough time context to distinguish the albums:
+If the same reviewed album name appears more than once, those bundles merge into
+one album folder. To keep separate visits apart, give them distinct album names
+with enough time context:
 
 ```text
 Originals/

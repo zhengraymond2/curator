@@ -321,19 +321,8 @@ def assign_bundle_destination_names(
     identifications: Mapping[str, PlaceIdentification],
 ) -> dict[str, tuple[str, str]]:
     assigned: dict[str, tuple[str, str]] = {}
-    used: set[tuple[str, str]] = set()
     for bundle in bundles:
-        country, folder = bundle_destination_names(bundle, identifications.get(bundle.group_id))
-        candidate = (country, folder)
-        if candidate in used:
-            suffix = safe_human_component(bundle.fallback_name, "Bundle")
-            candidate = (country, f"{folder} - {suffix}")
-            counter = 2
-            while candidate in used:
-                candidate = (country, f"{folder} - {suffix} {counter}")
-                counter += 1
-        used.add(candidate)
-        assigned[bundle.group_id] = candidate
+        assigned[bundle.group_id] = bundle_destination_names(bundle, identifications.get(bundle.group_id))
     return assigned
 
 
