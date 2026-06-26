@@ -514,11 +514,14 @@ Curator should:
 - refuse hard deletes
 - refuse overwrites
 - avoid following unexpected symlinks by default
-- require explicit `--apply` for mutations
+- require explicit `Commit` or `--apply` for mutations
+- keep Source read-only during commit
 - create parent directories only inside declared destination roots
-- log every move/copy
+- create logs only inside declared destination roots
+- log every copy
 - use conflict-free names for trash entries
 - support staged planning before copy operations
+- never overwrite, delete, or unlink destination files during commit
 
 For development and testing, no command should touch external volumes unless explicitly invoked by the user. Generated tests must stay under:
 

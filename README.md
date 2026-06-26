@@ -57,6 +57,10 @@ then waits on the final status page until `Commit` is pressed. The commit step
 copies directly from Source into `DEST/Originals/` and validates the destination
 against the original Source files.
 
+During commit, Curator applies a restricted Source-to-Dest copy policy: Source is
+read-only, Dest can receive newly created directories and files, and Curator
+never overwrites, deletes, or unlinks files as part of the copy.
+
 Run tests with:
 
 ```sh
