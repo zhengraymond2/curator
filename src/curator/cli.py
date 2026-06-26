@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_plan_apply_args(ingest)
     ingest.set_defaults(func=cmd_ingest)
 
-    organize = subparsers.add_parser("organize", help="organize unprocessed media into Originals/")
+    organize = subparsers.add_parser("organize", help="organize unprocessed media into Country/Album folders")
     organize.add_argument("--mode", choices=["ongoing", "migration"], default="ongoing")
     organize.add_argument(
         "--transfer",

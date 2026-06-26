@@ -255,7 +255,7 @@ class CliTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 0)
-        self.assertTrue((library / "Originals" / "Unsorted" / "DCIM" / "DSC_0001.NEF").exists())
+        self.assertTrue((library / "Unsorted" / "DCIM" / "DSC_0001.NEF").exists())
         self.assertIn("Final integrity verification: PASSED", stdout.getvalue())
         self.assertIn("Checksum comparison: PASSED", stdout.getvalue())
         self.assertIn("Filesum comparison: PASSED", stdout.getvalue())
@@ -331,7 +331,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(reporter.waited)
         self.assertTrue(dryrun_path.exists())
         self.assertIn("Unsorted/\n    DCIM/\n        DSC_0001.NEF\n", dryrun_path.read_text(encoding="utf-8"))
-        self.assertTrue((library / "Originals" / "Unsorted" / "DCIM" / "DSC_0001.NEF").exists())
+        self.assertTrue((library / "Unsorted" / "DCIM" / "DSC_0001.NEF").exists())
         self.assertIn("Curator is copying files", reporter.started_messages[-1])
         self.assertIn("Final integrity verification: PASSED", reporter.succeeded_summary)
         self.assertIn("Wrote dry-run hierarchy:", stdout.getvalue())

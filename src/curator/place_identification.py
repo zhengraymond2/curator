@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - exercised only without installed deps
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
 DEFAULT_PROMPT_NAME = "prompt_001_identify_place.txt"
+DEFAULT_COUNTRY_PROMPT_NAME = "prompt_002_identify_country_for_album.txt"
 DEFAULT_MAX_IMAGE_SIDE = 1536
 DEFAULT_JPEG_QUALITY = 82
 DEFAULT_ENV_FILE_NAME = ".env"
@@ -144,6 +145,10 @@ class PlaceIdentification:
 
 
 def load_place_identification_prompt(prompt_name: str = DEFAULT_PROMPT_NAME) -> str:
+    return resources.files("curator").joinpath("prompts", prompt_name).read_text(encoding="utf-8")
+
+
+def load_country_identification_prompt(prompt_name: str = DEFAULT_COUNTRY_PROMPT_NAME) -> str:
     return resources.files("curator").joinpath("prompts", prompt_name).read_text(encoding="utf-8")
 
 
@@ -402,6 +407,29 @@ class OpenRouterPlaceIdentifier:
             alternate_guesses=tuple(str(item) for item in parsed["alternate_guesses"]),
             sampled_paths=tuple(image.source_path for image in prepared_images),
             raw_response=response,
+        )
+
+    def identify_country_for_album(
+        self,
+        group_id: str,
+        album_name: str,
+        prepared_images: Sequence[PreparedImage],
+        prompt: str | None = None,
+    ) -> PlaceIdentification:
+        prompt_text = prompt or load_country_identification_prompt()
+        prompt_text = f"{prompt_text}\n\nAlbum name selected by the user: {album_name}"
+        identification = self.identify_prepared_images(group_id, prepared_images, prompt=prompt_text)
+        return PlaceIdentification(
+            group_id=identification.group_id,
+            country_or_region=identification.country_or_region,
+            place_name=album_name,
+            confidence=identification.confidence,
+            is_unknown=identification.is_unknown,
+            rationale=identification.rationale,
+            visual_evidence=identification.visual_evidence,
+            alternate_guesses=identification.alternate_guesses,
+            sampled_paths=identification.sampled_paths,
+            raw_response=identification.raw_response,
         )
 
     def _build_payload(

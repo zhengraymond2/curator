@@ -9,7 +9,7 @@ from tests.helpers import unique_case_dir
 
 
 class DryRunTests(unittest.TestCase):
-    def test_render_destination_tree_relative_to_originals(self) -> None:
+    def test_render_destination_tree_relative_to_legacy_originals(self) -> None:
         case = unique_case_dir("dryrun-render")
         library = case / "library"
         plan = make_plan(
@@ -36,6 +36,34 @@ class DryRunTests(unittest.TestCase):
                     "        DSC_0002.NEF",
                     "    Rome/",
                     "        DSC_0001.NEF",
+                    "        DSC_0001.NEF",
+                    "",
+                ]
+            ),
+        )
+
+    def test_render_destination_tree_prefers_organization_root(self) -> None:
+        case = unique_case_dir("dryrun-render-root")
+        library = case / "library"
+        plan = make_plan(
+            run_id="dryrun-test",
+            description="dry run tree",
+            metadata={"kind": "organize", "library": str(library), "organization_root": str(library)},
+            operations=[
+                Operation(type="copy", src="/src/a.NEF", dest=str(library / "Italy" / "Rome" / "DSC_0001.NEF")),
+                Operation(type="copy", src="/src/b.NEF", dest=str(library / "Iceland" / "Laugavegur" / "DSC_0002.NEF")),
+            ],
+        )
+
+        self.assertEqual(
+            render_destination_tree(plan),
+            "\n".join(
+                [
+                    "Iceland/",
+                    "    Laugavegur/",
+                    "        DSC_0002.NEF",
+                    "Italy/",
+                    "    Rome/",
                     "        DSC_0001.NEF",
                     "",
                 ]

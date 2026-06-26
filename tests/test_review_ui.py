@@ -200,6 +200,49 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(renamed["albums"][0]["place_name"], "Corcovado")
         self.assertEqual(state.decisions["103NCZ_6::01"].place_name, "Corcovado")
 
+    def test_review_state_renames_final_album_country_and_name_separately(self) -> None:
+        state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
+        result = state.decide("Costa Rica", "Manuel Antonio")
+        album_key = result["albums"][0]["key"]
+
+        renamed = state.rename_album(str(album_key), "Panama", "Boquete")
+
+        self.assertEqual(renamed["albums"][0]["country_or_region"], "Panama")
+        self.assertEqual(renamed["albums"][0]["place_name"], "Boquete")
+        self.assertEqual(state.decisions["103NCZ_6::01"].country_or_region, "Panama")
+        self.assertEqual(state.decisions["103NCZ_6::01"].place_name, "Boquete")
+
+    def test_review_state_starts_country_guess_for_plain_album_name(self) -> None:
+        requests = []
+        state = ReviewState(
+            [ReviewItem(sample_identification(country_or_region="Italy", place_name="unknown"), (sample_image(),), file_count=1)],
+            country_guess_starter=lambda group_id, album_name, images: requests.append((group_id, album_name, images)),
+        )
+
+        result = state.decide("", "Cinque Torri")
+
+        self.assertTrue(result["country_guesses_loading"])
+        self.assertEqual(requests[0][0], "103NCZ_6::01")
+        self.assertEqual(requests[0][1], "Cinque Torri")
+        country_guess = sample_identification(country_or_region="Italy", place_name="Cinque Torri")
+        state.store_country_guess("103NCZ_6::01", "Cinque Torri", country_guess)
+        payload = state.payload()
+
+        self.assertFalse(payload["country_guesses_loading"])
+        self.assertEqual(payload["albums"][0]["country_or_region"], "Italy")
+        self.assertEqual(state.image_locations["DSC_0001.NEF"].country_or_region, "Italy")
+
+    def test_review_state_does_not_guess_country_when_user_supplies_country(self) -> None:
+        requests = []
+        state = ReviewState(
+            [ReviewItem(sample_identification(), (sample_image(),), file_count=1)],
+            country_guess_starter=lambda group_id, album_name, images: requests.append((group_id, album_name, images)),
+        )
+
+        state.decide("Costa Rica", "Manuel Antonio")
+
+        self.assertEqual(requests, [])
+
     def test_review_state_moves_images_between_final_albums(self) -> None:
         state = ReviewState(
             [
@@ -230,9 +273,12 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(state.image_locations["DSC_0001.NEF"].place_name, "Tamarindo")
 
     def test_review_html_uses_single_location_textbox(self) -> None:
-        self.assertNotIn('id="country"', HTML)
         self.assertIn('id="place"', HTML)
         self.assertIn('placeholder="Location or album name"', HTML)
+        self.assertIn('album-country-input', HTML)
+        self.assertIn('COUNTRY_OPTIONS', HTML)
+        self.assertIn('renderCountrySuggestions', HTML)
+        self.assertIn('country_or_region: countryOrRegion', HTML)
         self.assertIn('Edit folder name', HTML)
         self.assertIn('Looks good', HTML)
         self.assertIn('position: fixed', HTML)

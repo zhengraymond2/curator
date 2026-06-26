@@ -119,6 +119,37 @@ class VerificationTests(unittest.TestCase):
 
         self.assertTrue(report.success)
 
+    def test_ongoing_organize_verification_uses_organization_root_metadata(self) -> None:
+        case = unique_case_dir("verification-ongoing-root")
+        source = case
+        library = case / "library"
+        planned_src = case / "Incoming" / "A.NEF"
+        existing_organized = library / "Italy" / "Rome" / "OLD.NEF"
+        dest = library / "Unsorted" / "Incoming" / "A.NEF"
+        planned_src.parent.mkdir(parents=True)
+        existing_organized.parent.mkdir(parents=True)
+        dest.parent.mkdir(parents=True)
+        planned_src.write_bytes(b"alpha")
+        existing_organized.write_bytes(b"already organized")
+        dest.write_bytes(b"alpha")
+        plan = make_plan(
+            run_id=new_run_id("verification"),
+            description="verify",
+            metadata={
+                "kind": "organize",
+                "transfer": "copy",
+                "mode": "ongoing",
+                "source": str(source),
+                "library": str(library),
+                "organization_root": str(library),
+            },
+            operations=[Operation(type="copy", src=str(planned_src), dest=str(dest))],
+        )
+
+        report = verify_organize_copy_plan(plan)
+
+        self.assertTrue(report.success)
+
 
 if __name__ == "__main__":
     unittest.main()
