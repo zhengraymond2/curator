@@ -178,6 +178,7 @@ Initial command surface:
 
 ```text
 curator --help
+curator --source /Volumes/mySD --dest /Volumes/myHD
 curator ingest --help
 curator organize --help
 curator dedupe --help
@@ -213,21 +214,19 @@ Important options:
 --source PATH
 --library PATH
 --plan PATH
---dry-mode
---dry-run-file NAME
 --identify-places
 --review-unknown-places
 --review-ui
 --apply
 ```
 
-`--dry-mode` writes a human-readable fake destination hierarchy to `SOURCE/DRYRUN.txt` and performs no copy/move operations. `--dry-run-file` can write a second preview such as `DRYRUN2.txt`. It is intentionally incompatible with `--apply`.
+The top-level `curator --source SOURCE --dest DEST` command is the preferred reviewed workflow. It opens the review UI, stages `SOURCE/DRYRUN.txt` after the final `Looks good`, then waits for `Commit` before copying from Source into `DEST/Originals/`.
 
 `--identify-places` samples up to two images from each bundled folder, sends those samples to the OpenRouter place-identification stage, and uses the returned `country_or_region` and `place_name` to name planned destination folders.
 
 `--review-unknown-places` makes unknown model results interactive: Curator opens the sampled images in a macOS Quick Look gallery, the user closes it with Esc, and then enters a corrected location in the CLI.
 
-`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. Curator creates lightweight pending review items for all bundles up front, then prepares sampled images for every bundle in the background. As each sampled set is ready, Curator starts that bundle's LLM request and stores the in-memory result as `llm_data`. While a bundle has no `llm_data`, the model fields show a loading spinner; when `llm_data` arrives, the page shows the model guess, confidence, rationale, and visible evidence. Full gallery images are prepared separately and served through `/api/image`, keeping `/api/state` small. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle even if the model result or full gallery is still pending. When all bundles are reviewed, Curator writes the requested dry-run file.
+`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. Curator creates lightweight pending review items for all bundles up front, then prepares sampled images for every bundle in the background. As each sampled set is ready, Curator starts that bundle's LLM request and stores the in-memory result as `llm_data`. While a bundle has no `llm_data`, the model fields show a loading spinner; when `llm_data` arrives, the page shows the model guess, confidence, rationale, and visible evidence. Full gallery images are prepared separately and served through `/api/image`, keeping `/api/state` small. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle even if the model result or full gallery is still pending. When all bundles are reviewed, `Looks good` stages `SOURCE/DRYRUN.txt`; `Commit` starts copying and validation.
 
 The review UI keeps a list of previously entered places and uses it in two ways:
 
@@ -519,7 +518,7 @@ Curator should:
 - create parent directories only inside declared destination roots
 - log every move/copy
 - use conflict-free names for trash entries
-- support dry-run planning
+- support staged planning before copy operations
 
 For development and testing, no command should touch external volumes unless explicitly invoked by the user. Generated tests must stay under:
 

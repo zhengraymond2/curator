@@ -65,16 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
     organize.add_argument("--source", required=True, type=Path)
     organize.add_argument("--library", required=True, type=Path)
     organize.add_argument(
-        "--dry-mode",
-        action="store_true",
-        help="write SOURCE/DRYRUN.txt with the planned folder hierarchy and do not apply changes",
-    )
-    organize.add_argument(
-        "--dry-run-file",
-        default="DRYRUN.txt",
-        help="filename to write inside SOURCE when --dry-mode is used",
-    )
-    organize.add_argument(
         "--identify-places",
         action="store_true",
         help="use OpenRouter image analysis to name bundled folders",
@@ -185,8 +175,6 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_organize(args: argparse.Namespace) -> int:
-    if args.dry_mode and args.apply:
-        raise ValueError("--dry-mode cannot be combined with --apply")
     progress = cli_progress()
     plan = build_organize_plan(
         args.source,
@@ -196,19 +184,9 @@ def cmd_organize(args: argparse.Namespace) -> int:
         identify_places=args.identify_places or args.review_ui,
         review_unknown_places=args.review_unknown_places,
         review_ui=args.review_ui,
-        wait_for_final_validation=args.apply and not args.dry_mode and args.transfer == "copy",
+        wait_for_final_validation=args.apply and args.transfer == "copy",
         progress=progress,
     )
-    if args.dry_mode:
-        if args.plan:
-            write_plan(plan, args.plan)
-            print(f"Wrote plan: {args.plan}")
-        dryrun_path = write_dryrun_file(plan, args.source, filename=args.dry_run_file)
-        if progress.debug_enabled:
-            print(plan.summary())
-            print(f"Wrote dry-run hierarchy: {dryrun_path}")
-        print("No copy/move operations were applied.")
-        return 0
     return handle_generated_plan(plan, args, default_log_root=args.library / ".curator" / "logs", progress=progress)
 
 

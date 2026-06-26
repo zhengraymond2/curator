@@ -33,13 +33,11 @@ def render_destination_tree(plan: Plan) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_dryrun_file(plan: Plan, source: Path, filename: str = "DRYRUN.txt") -> Path:
+def write_dryrun_file(plan: Plan, source: Path) -> Path:
     source = source.expanduser().resolve()
     if not source.is_dir():
-        raise ValueError(f"dry-mode source must be a directory: {source}")
-    if Path(filename).name != filename:
-        raise ValueError("dry-run filename must be a simple filename, not a path")
-    path = source / filename
+        raise ValueError(f"dry-run source must be a directory: {source}")
+    path = source / "DRYRUN.txt"
     path.write_text(render_destination_tree(plan), encoding="utf-8")
     return path
 

@@ -46,6 +46,17 @@ Run the CLI from the repo with:
 python -m curator --help
 ```
 
+Run the reviewed source-to-destination workflow with:
+
+```sh
+curator --source /Volumes/mySD --dest /Volumes/myHD
+```
+
+Curator opens the browser review, writes `SOURCE/DRYRUN.txt` after `Looks good`,
+then waits on the final status page until `Commit` is pressed. The commit step
+copies directly from Source into `DEST/Originals/` and validates the destination
+against the original Source files.
+
 Run tests with:
 
 ```sh
@@ -63,35 +74,15 @@ Tests generate fake media only under:
 Project-specific commands live in `scripts/`. These are thin wrappers around the
 CLI, useful while Curator is still run from the repo checkout.
 
-Run the reviewed image-location dry run against any source directory with:
+Run the reviewed flow from the checkout with:
 
 ```sh
-./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
+./scripts/review "/Volumes/mySD" "/Volumes/myHD"
 ```
 
-The first unnamed argument is required and must be the source directory. The
-script writes the preview hierarchy to `SOURCE_DIR/DRYRUN2.txt` by default and
-does not copy or move media.
-
-Useful overrides:
-
-```sh
-DRY_RUN_FILE=DRYRUN3.txt ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
-LIBRARY_ROOT=/path/to/library ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
-PYTHON_BIN="$(which python3)" ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
-```
-
-Run the same reviewed flow as a real copy with:
-
-```sh
-LIBRARY_ROOT=/path/to/library ./scripts/review "/Volumes/LaCie 1/CRG"
-```
-
-The non-dry-run script creates `SOURCE_DIR/.lock` before copying. On macOS it
-tries to mark that lock file immutable so accidental source-folder deletion
-fails until you remove the lock. At the end of an applied organize copy, Curator
-verifies source/final checksums, file totals, and filename sets. If any check
-fails, it prints a large red error and exits non-zero.
+At the end of an applied organize copy, Curator verifies source/final checksums,
+file totals, and filename sets. If any check fails, it prints a large red error
+and exits non-zero.
 
 ## LLM Place Identification
 

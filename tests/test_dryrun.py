@@ -61,25 +61,6 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(path, source / "DRYRUN.txt")
         self.assertEqual(path.read_text(encoding="utf-8"), "Italy/\n    Rome/\n        DSC_0001.NEF\n")
 
-    def test_write_dryrun_file_accepts_custom_filename(self) -> None:
-        case = unique_case_dir("dryrun-write-custom")
-        source = case / "originalFolder"
-        library = case / "library"
-        source.mkdir()
-        plan = make_plan(
-            run_id="dryrun-test",
-            description="dry run tree",
-            metadata={"kind": "organize", "library": str(library)},
-            operations=[
-                Operation(type="copy", src=str(source / "DSC_0001.NEF"), dest=str(library / "Originals" / "Iceland" / "Laugavegur" / "DSC_0001.NEF")),
-            ],
-        )
-
-        path = write_dryrun_file(plan, source, filename="DRYRUN2.txt")
-
-        self.assertEqual(path, source / "DRYRUN2.txt")
-        self.assertEqual(path.read_text(encoding="utf-8"), "Iceland/\n    Laugavegur/\n        DSC_0001.NEF\n")
-
 
 if __name__ == "__main__":
     unittest.main()
