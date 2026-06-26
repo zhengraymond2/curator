@@ -15,6 +15,7 @@ from typing import Callable, Mapping, Sequence
 from .metadata import capture_timestamps, metadata_cache_path
 from .paths import is_relative_to, safe_component, safe_human_component
 from .place_identification import (
+    AlbumCountryContext,
     DEFAULT_JPEG_QUALITY,
     DEFAULT_MAX_IMAGE_SIDE,
     ImagePreprocessor,
@@ -23,7 +24,7 @@ from .place_identification import (
     PhotoCandidate,
     PlaceIdentification,
     PreparedImage,
-    load_country_identification_prompt,
+    load_batch_country_identification_prompt,
     load_place_identification_prompt,
     select_place_identification_samples,
 )
@@ -408,7 +409,7 @@ def identify_bundle_places_with_review_ui(
         jpeg_quality=max(1, min(95, DEFAULT_JPEG_QUALITY)),
     )
     base_prompt = load_place_identification_prompt()
-    country_prompt = load_country_identification_prompt()
+    country_prompt = load_batch_country_identification_prompt()
     jobs: list[ReviewAssetJob] = []
     items: list[ReviewItem] = []
 
@@ -433,13 +434,11 @@ def identify_bundle_places_with_review_ui(
     progress.log(f"Opening browser review UI for {len(items)} bundle(s)")
 
     def start_background_work(state: ReviewState) -> None:
-        state.country_guess_starter = (
-            lambda group_id, album_name, prepared_images: start_country_identification(
+        state.country_batch_guess_starter = (
+            lambda contexts: start_batch_country_identification(
                 state,
                 identifier=identifier,
-                group_id=group_id,
-                album_name=album_name,
-                prepared_images=prepared_images,
+                contexts=contexts,
                 prompt=country_prompt,
                 progress=progress,
             )
@@ -515,7 +514,6 @@ def start_review_asset_preparation(
                 continue
 
             prepared_samples_by_group[bundle.group_id] = prepared_samples
-            state.store_model_images(bundle.group_id, prepared_samples)
             state.store_images(bundle.group_id, prepared_samples, complete=False)
             start_llm_identification(
                 state,
@@ -543,42 +541,30 @@ def start_review_asset_preparation(
     return thread
 
 
-def start_country_identification(
+def start_batch_country_identification(
     state: ReviewState,
     *,
     identifier: OpenRouterPlaceIdentifier,
-    group_id: str,
-    album_name: str,
-    prepared_images: tuple[PreparedImage, ...],
+    contexts: tuple[AlbumCountryContext, ...],
     prompt: str,
     progress: ProgressReporter,
 ) -> threading.Thread:
     def identify() -> None:
-        if not prepared_images:
-            state.store_country_guess_error(group_id, ValueError("No sampled images available for country identification."))
+        if not contexts:
             return
         try:
-            identify_country = getattr(identifier, "identify_country_for_album", None)
-            if callable(identify_country):
-                identification = identify_country(group_id, album_name, prepared_images, prompt=prompt)
-            else:
-                identification = identifier.identify_prepared_images(
-                    group_id,
-                    prepared_images,
-                    prompt=f"{prompt}\n\nAlbum name selected by the user: {album_name}",
-                )
-                identification = replace(identification, place_name=album_name)
+            guesses = identifier.identify_countries_for_albums(contexts, prompt=prompt)
         except Exception as exc:
-            state.store_country_guess_error(group_id, exc)
-            progress.log(f"LLM country identification failed for {group_id}: {exc}")
+            state.store_country_batch_error(exc)
+            progress.log(f"LLM batch country identification failed: {exc}")
             return
 
-        state.store_country_guess(group_id, album_name, identification)
-        progress.log(f"LLM country identification ready for {group_id}", debug=True)
+        state.store_country_batch_guesses(guesses)
+        progress.log(f"LLM batch country identification ready for {len(contexts)} album(s)", debug=True)
 
     thread = threading.Thread(
         target=identify,
-        name=f"curator-country-{safe_component(group_id, 'group')}",
+        name="curator-country-batch",
         daemon=True,
     )
     thread.start()

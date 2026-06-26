@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from curator.place_identification import PlaceIdentification, PreparedImage
+from curator.place_identification import AlbumCountryGuess, PlaceIdentification, PreparedImage
 from curator.review_ui import HTML, ReviewItem, ReviewState, review_item_payload
 
 
@@ -212,20 +212,32 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(state.decisions["103NCZ_6::01"].country_or_region, "Panama")
         self.assertEqual(state.decisions["103NCZ_6::01"].place_name, "Boquete")
 
-    def test_review_state_starts_country_guess_for_plain_album_name(self) -> None:
+    def test_review_state_starts_batch_country_guess_for_plain_album_name(self) -> None:
         requests = []
         state = ReviewState(
             [ReviewItem(sample_identification(country_or_region="Italy", place_name="unknown"), (sample_image(),), file_count=1)],
-            country_guess_starter=lambda group_id, album_name, images: requests.append((group_id, album_name, images)),
+            country_batch_guess_starter=lambda contexts: requests.append(contexts),
         )
 
         result = state.decide("", "Cinque Torri")
 
         self.assertTrue(result["country_guesses_loading"])
-        self.assertEqual(requests[0][0], "103NCZ_6::01")
-        self.assertEqual(requests[0][1], "Cinque Torri")
-        country_guess = sample_identification(country_or_region="Italy", place_name="Cinque Torri")
-        state.store_country_guess("103NCZ_6::01", "Cinque Torri", country_guess)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0][0].group_id, "103NCZ_6::01")
+        self.assertEqual(requests[0][0].album_name, "Cinque Torri")
+        self.assertEqual(requests[0][0].llm_response.place_name, "unknown")
+        state.store_country_batch_guesses(
+            [
+                AlbumCountryGuess(
+                    group_id="103NCZ_6::01",
+                    album_name="Cinque Torri",
+                    country_or_region="Italy",
+                    confidence=0.8,
+                    rationale="album context",
+                    raw_response={},
+                )
+            ]
+        )
         payload = state.payload()
 
         self.assertFalse(payload["country_guesses_loading"])
@@ -236,7 +248,7 @@ class ReviewUiTests(unittest.TestCase):
         requests = []
         state = ReviewState(
             [ReviewItem(sample_identification(), (sample_image(),), file_count=1)],
-            country_guess_starter=lambda group_id, album_name, images: requests.append((group_id, album_name, images)),
+            country_batch_guess_starter=lambda contexts: requests.append(contexts),
         )
 
         state.decide("Costa Rica", "Manuel Antonio")

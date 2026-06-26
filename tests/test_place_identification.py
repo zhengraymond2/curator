@@ -12,9 +12,12 @@ from unittest.mock import patch
 
 from curator.metadata import CaptureTimestamp
 from curator.place_identification import (
+    AlbumCountryContext,
     OpenRouterPlaceIdentifier,
     PhotoCandidate,
     PreparedImage,
+    PlaceIdentification,
+    load_batch_country_identification_prompt,
     identify_places_for_groups,
     load_place_identification_prompt,
     select_place_identification_samples,
@@ -69,6 +72,48 @@ class CapturingTransport:
         }
 
 
+class BatchCountryTransport:
+    def __init__(self) -> None:
+        self.payload = None
+
+    def __call__(
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        self.payload = json.loads(body.decode("utf-8"))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "albums": [
+                                    {
+                                        "group_id": "a::01",
+                                        "album_name": "Cinque Torri",
+                                        "country_or_region": "Italy",
+                                        "confidence": 0.88,
+                                        "rationale": "Dolomite album name and prior mountain context.",
+                                    },
+                                    {
+                                        "group_id": "b::01",
+                                        "album_name": "Lago di Braies",
+                                        "country_or_region": "Italy",
+                                        "confidence": 0.9,
+                                        "rationale": "Nearby Italian lake name and sequence context.",
+                                    },
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+
 class PlaceIdentificationTests(unittest.TestCase):
     def test_sampler_prefers_max_timestamp_distance(self) -> None:
         photos = [
@@ -86,6 +131,12 @@ class PlaceIdentificationTests(unittest.TestCase):
 
         self.assertIn("unknown XYZ", prompt)
         self.assertIn("Return exactly one JSON object", prompt)
+
+    def test_batch_country_prompt_is_checked_in(self) -> None:
+        prompt = load_batch_country_identification_prompt()
+
+        self.assertIn("Albums usually do not alternate countries", prompt)
+        self.assertIn("Preserve each group_id and album_name exactly", prompt)
 
     def test_openrouter_payload_uses_gpt_54_mini_and_image_parts(self) -> None:
         transport = CapturingTransport()
@@ -144,6 +195,38 @@ class PlaceIdentificationTests(unittest.TestCase):
                     os.environ["OPENROUTER_API_KEY"] = original_key
 
         self.assertEqual(transport.headers["Authorization"], "Bearer dotenv-key")
+
+    def test_openrouter_batch_country_payload_uses_prior_context_without_images(self) -> None:
+        transport = BatchCountryTransport()
+        identifier = OpenRouterPlaceIdentifier(api_key="test-key", transport=transport)
+        prior = PlaceIdentification(
+            group_id="a::01",
+            country_or_region="Unsorted",
+            place_name="unknown mountain",
+            confidence=0.2,
+            is_unknown=True,
+            rationale="Jagged mountain ridge and alpine lake.",
+            visual_evidence=("mountain ridge", "lake"),
+            alternate_guesses=("Dolomites",),
+            sampled_paths=(Path("DSC_0001.NEF"),),
+            raw_response={},
+        )
+
+        guesses = identifier.identify_countries_for_albums(
+            (
+                AlbumCountryContext("a::01", "Cinque Torri", prior),
+                AlbumCountryContext("b::01", "Lago di Braies", prior),
+            )
+        )
+
+        self.assertEqual([guess.country_or_region for guess in guesses], ["Italy", "Italy"])
+        self.assertEqual(transport.payload["response_format"]["json_schema"]["name"], "album_country_identification")
+        content = transport.payload["messages"][0]["content"]
+        self.assertEqual([part["type"] for part in content], ["text", "text"])
+        payload_text = content[1]["text"]
+        self.assertIn("Cinque Torri", payload_text)
+        self.assertIn("Jagged mountain ridge", payload_text)
+        self.assertNotIn("image_url", json.dumps(content))
 
     def test_identify_places_for_groups_samples_two_images_per_group(self) -> None:
         transport = CapturingTransport()

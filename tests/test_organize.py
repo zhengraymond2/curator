@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from curator.metadata import CaptureTimestamp
 from curator.organize import build_organize_plan
-from curator.place_identification import OpenRouterError, PlaceIdentification, PreparedImage
+from curator.place_identification import AlbumCountryGuess, OpenRouterError, PlaceIdentification, PreparedImage
 from curator.review_ui import FinalReviewResult, ReviewState
 
 from tests.helpers import unique_case_dir
@@ -465,18 +465,17 @@ class OrganizeTests(unittest.TestCase):
                     raw_response={},
                 )
 
-            def identify_country_for_album(self, group_id, album_name, prepared_images, prompt=None):
-                return PlaceIdentification(
-                    group_id=group_id,
-                    country_or_region="Italy",
-                    place_name=album_name,
-                    confidence=0.8,
-                    is_unknown=False,
-                    rationale="album name",
-                    visual_evidence=(),
-                    alternate_guesses=(),
-                    sampled_paths=(),
-                    raw_response={},
+            def identify_countries_for_albums(self, contexts, prompt=None):
+                return tuple(
+                    AlbumCountryGuess(
+                        group_id=context.group_id,
+                        album_name=context.album_name,
+                        country_or_region="Italy",
+                        confidence=0.8,
+                        rationale="album name",
+                        raw_response={},
+                    )
+                    for context in contexts
                 )
 
         class FakePreprocessor:
