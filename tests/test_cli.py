@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import questionary
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -18,6 +19,7 @@ from curator.cli import (
     main,
     path_completer,
     prompt_command_menu,
+    select_command_with_questionary,
 )
 from curator.metadata import CaptureTimestamp
 from curator.plan import make_plan
@@ -109,9 +111,11 @@ class CliTests(unittest.TestCase):
         export = destination_root / "Export 2026-06-25 14:05"
         self.assertEqual(exit_code, 0)
         self.assertTrue(export.is_dir())
-        self.assertIn("Commands:", stdout.getvalue())
-        self.assertIn("    ingestion", stdout.getvalue())
-        self.assertIn("    dedupe", stdout.getvalue())
+        self.assertIn("===  CURATOR ===", stdout.getvalue())
+        self.assertNotIn("Commands:", stdout.getvalue())
+        self.assertIn("Select command:", stdout.getvalue())
+        self.assertIn("    ingestion \033[90m-- copy a source folder into a verified export\033[0m", stdout.getvalue())
+        self.assertIn("    dedupe \033[90m-- find exact duplicates and soft-trash extra copies\033[0m", stdout.getvalue())
         self.assertNotIn("1. ingestion", stdout.getvalue())
         self.assertIn("Enter empty to accept detected drives.", stdout.getvalue())
         self.assertIn(str(source), prompts[1])
@@ -134,8 +138,44 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(selected, "dedupe")
         self.assertEqual(seen_commands, ("ingestion", "dedupe"))
-        self.assertIn("Commands:", stdout.getvalue())
+        self.assertNotIn("Commands:", stdout.getvalue())
         self.assertNotIn("Select command", stdout.getvalue())
+
+    def test_questionary_command_menu_formats_prompt_and_helper_text(self) -> None:
+        captured = {}
+
+        def fake_select(message: str, **kwargs):
+            captured["message"] = message
+            captured.update(kwargs)
+
+            class FakeQuestion:
+                def ask(self) -> str:
+                    return "ingestion"
+
+            return FakeQuestion()
+
+        with patch.object(questionary, "select", side_effect=fake_select):
+            selected = select_command_with_questionary(("ingestion", "dedupe"))
+
+        self.assertEqual(selected, "ingestion")
+        self.assertEqual(captured["message"], "Select command:")
+        self.assertEqual(captured["instruction"], " ")
+        self.assertEqual(captured["pointer"], ">")
+        self.assertEqual([choice.value for choice in captured["choices"]], ["ingestion", "dedupe"])
+        self.assertEqual(
+            captured["choices"][0].title,
+            [
+                ("", "ingestion"),
+                ("fg:#8a8a8a", " -- copy a source folder into a verified export"),
+            ],
+        )
+        self.assertEqual(
+            captured["choices"][1].title,
+            [
+                ("", "dedupe"),
+                ("fg:#8a8a8a", " -- find exact duplicates and soft-trash extra copies"),
+            ],
+        )
 
     def test_interactive_command_menu_cancels_when_selector_returns_none(self) -> None:
         with redirect_stdout(io.StringIO()):

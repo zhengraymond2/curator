@@ -135,6 +135,12 @@ INTERNAL_VOLUME_NAMES = {"Macintosh HD", "Macintosh HD - Data", "macOS", "MacOS"
 GREY = "\033[90m"
 RESET = "\033[0m"
 INTERACTIVE_COMMANDS = ("ingestion", "dedupe")
+INTERACTIVE_COMMAND_DESCRIPTIONS = {
+    "ingestion": "copy a source folder into a verified export",
+    "dedupe": "find exact duplicates and soft-trash extra copies",
+}
+COMMAND_DESCRIPTION_STYLE = "fg:#8a8a8a"
+CLI_TITLE = "===  CURATOR ==="
 
 
 @dataclass(frozen=True)
@@ -166,7 +172,7 @@ def cmd_interactive(
     input_func = input_func or input
     now_func = now_func or datetime.now
 
-    print("Curator")
+    print_cli_title()
     selected_command = prompt_command_menu(input_func=input_func)
 
     if selected_command == "ingestion":
@@ -242,7 +248,6 @@ def prompt_command_menu(
     input_func: Callable[[str], str],
     select_func: Callable[[tuple[str, ...]], str | None] | None = None,
 ) -> str:
-    print("Commands:")
     if select_func is not None:
         selected = select_func(INTERACTIVE_COMMANDS)
         return resolve_command_selection(selected)
@@ -251,10 +256,34 @@ def prompt_command_menu(
         selected = select_command_with_questionary(INTERACTIVE_COMMANDS)
         return resolve_command_selection(selected)
 
+    print("Select command:")
     for command in INTERACTIVE_COMMANDS:
-        print(f"    {command}")
-    selected = input_func(f"Select command [{INTERACTIVE_COMMANDS[0]}]: ").strip()
+        print(format_command_menu_line(command))
+    selected = input_func("> ").strip()
     return resolve_command_selection(selected)
+
+
+def print_cli_title() -> None:
+    border = "=" * len(CLI_TITLE)
+    print(border)
+    print(CLI_TITLE)
+    print(border)
+    print()
+
+
+def format_command_menu_line(command: str) -> str:
+    return f"    {command} {GREY}-- {command_description(command)}{RESET}"
+
+
+def format_questionary_command_title(command: str) -> list[tuple[str, str]]:
+    return [
+        ("", command),
+        (COMMAND_DESCRIPTION_STYLE, f" -- {command_description(command)}"),
+    ]
+
+
+def command_description(command: str) -> str:
+    return INTERACTIVE_COMMAND_DESCRIPTIONS[command]
 
 
 def select_command_with_questionary(commands: tuple[str, ...]) -> str | None:
@@ -264,11 +293,16 @@ def select_command_with_questionary(commands: tuple[str, ...]) -> str | None:
         raise RuntimeError("interactive command selection requires questionary; run `make` to update the environment") from exc
 
     return questionary.select(
-        "Select command",
-        choices=list(commands),
+        "Select command:",
+        choices=[
+            questionary.Choice(format_questionary_command_title(command), value=command)
+            for command in commands
+        ],
         default=commands[0],
         qmark="",
         pointer=">",
+        instruction=" ",
+        show_description=False,
         use_arrow_keys=True,
         use_jk_keys=True,
         use_emacs_keys=True,
