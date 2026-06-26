@@ -5,6 +5,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .checksums import sha256_file
 from .paths import is_relative_to
@@ -73,6 +74,7 @@ def apply_plan(
     *,
     log_root: Path | None = None,
     progress: ProgressReporter | None = None,
+    operation_progress: Callable[[int, int], None] | None = None,
 ) -> list[dict[str, object]]:
     progress = progress or ProgressReporter.disabled()
     policy = restricted_policy_for_plan(plan)
@@ -91,11 +93,15 @@ def apply_plan(
             f"Applying {len(plan.operations)} operation(s)",
             done=lambda: f"Applied {len(results)} operation(s)",
         ):
+            if operation_progress is not None:
+                operation_progress(0, len(plan.operations))
             for operation in plan.operations:
                 result = apply_operation(operation, policy=policy)
                 result["time"] = utc_now_iso()
                 result["run_id"] = plan.run_id
                 results.append(result)
+                if operation_progress is not None:
+                    operation_progress(len(results), len(plan.operations))
                 if log_handle is not None:
                     log_handle.write(json.dumps(result, sort_keys=True) + "\n")
                     log_handle.flush()

@@ -108,6 +108,30 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(dest.exists())
         self.assertEqual(dest.read_bytes(), b"source")
 
+    def test_apply_plan_reports_operation_progress(self) -> None:
+        case = unique_case_dir("safety-progress")
+        source_a = case / "source-a.NEF"
+        source_b = case / "source-b.NEF"
+        dest_a = case / "dest-a.NEF"
+        dest_b = case / "dest-b.NEF"
+        source_a.write_bytes(b"a")
+        source_b.write_bytes(b"bb")
+        plan = make_plan(
+            run_id=new_run_id("test"),
+            description="progress",
+            operations=[
+                Operation(type="copy", src=str(source_a), dest=str(dest_a), expected_size=1),
+                Operation(type="copy", src=str(source_b), dest=str(dest_b), expected_size=2),
+            ],
+        )
+        events: list[tuple[int, int]] = []
+
+        apply_plan(plan, operation_progress=lambda completed, total: events.append((completed, total)))
+
+        self.assertEqual(events, [(0, 2), (1, 2), (2, 2)])
+        self.assertEqual(dest_a.read_bytes(), b"a")
+        self.assertEqual(dest_b.read_bytes(), b"bb")
+
 
 if __name__ == "__main__":
     unittest.main()

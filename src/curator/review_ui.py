@@ -4,6 +4,7 @@ import base64
 import binascii
 import json
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,6 +52,13 @@ class FinalReviewResult:
     validation_reporter: FinalValidationReporter | None = None
 
 
+@dataclass(frozen=True)
+class FinalValidationProgress:
+    completed: int
+    total: int
+    started_at: float
+
+
 class ReviewState:
     def __init__(self, items: Sequence[ReviewItem], *, wait_for_final_validation: bool = False) -> None:
         self.items = list(items)
@@ -76,6 +84,7 @@ class ReviewState:
         self.final_validation_summary = ""
         self.final_validation_details = ""
         self.final_validation_dryrun_path = ""
+        self.final_validation_progress: FinalValidationProgress | None = None
         self.final_validation_seen = threading.Event()
         self.commit_requested = threading.Event()
         self.done = threading.Event()
@@ -91,6 +100,7 @@ class ReviewState:
                     summary=self.final_validation_summary,
                     details=self.final_validation_details,
                     dryrun_path=self.final_validation_dryrun_path,
+                    progress=self.final_validation_progress_payload(),
                     index=self.index,
                     total=len(self.items),
                 )
@@ -266,6 +276,7 @@ class ReviewState:
                 self.final_validation_summary = ""
                 self.final_validation_details = ""
                 self.final_validation_dryrun_path = ""
+                self.final_validation_progress = None
                 self.final_validation_seen.clear()
                 self.done.set()
                 return final_validation_payload(
@@ -275,6 +286,7 @@ class ReviewState:
                     summary=self.final_validation_summary,
                     details=self.final_validation_details,
                     dryrun_path=self.final_validation_dryrun_path,
+                    progress=self.final_validation_progress_payload(),
                     index=self.index,
                     total=len(self.items),
                 )
@@ -289,6 +301,7 @@ class ReviewState:
             self.final_validation_message = message
             self.final_validation_summary = ""
             self.final_validation_details = ""
+            self.final_validation_progress = None
             self.final_validation_seen.clear()
 
     def ready_to_commit(self, dryrun_path: Path) -> None:
@@ -299,6 +312,7 @@ class ReviewState:
             self.final_validation_summary = ""
             self.final_validation_details = ""
             self.final_validation_dryrun_path = str(dryrun_path)
+            self.final_validation_progress = None
             self.final_validation_seen.clear()
 
     def request_commit(self) -> Mapping[str, object]:
@@ -309,6 +323,7 @@ class ReviewState:
                 self.final_validation_message = "Curator is copying files, then checking checksums, file totals, and filenames."
                 self.final_validation_summary = ""
                 self.final_validation_details = ""
+                self.final_validation_progress = None
                 self.final_validation_seen.clear()
                 self.commit_requested.set()
             return final_validation_payload(
@@ -318,9 +333,48 @@ class ReviewState:
                 summary=self.final_validation_summary,
                 details=self.final_validation_details,
                 dryrun_path=self.final_validation_dryrun_path,
+                progress=self.final_validation_progress_payload(),
                 index=self.index,
                 total=len(self.items),
             )
+
+    def update_final_validation_progress(self, completed: int, total: int) -> None:
+        with self.lock:
+            total = max(0, total)
+            completed = max(0, completed)
+            if total:
+                completed = min(completed, total)
+            else:
+                completed = 0
+            existing = self.final_validation_progress
+            if existing is not None and existing.total == total and completed >= existing.completed:
+                started_at = existing.started_at
+            else:
+                started_at = time.monotonic()
+            self.final_validation_progress = FinalValidationProgress(
+                completed=completed,
+                total=total,
+                started_at=started_at,
+            )
+
+    def final_validation_progress_payload(self) -> Mapping[str, object] | None:
+        progress = self.final_validation_progress
+        if progress is None:
+            return None
+        elapsed = max(0.0, time.monotonic() - progress.started_at)
+        remaining = max(0, progress.total - progress.completed)
+        estimated_remaining: float | None = None
+        if progress.completed >= progress.total:
+            estimated_remaining = 0.0
+        elif progress.completed > 0:
+            estimated_remaining = elapsed * remaining / progress.completed
+        return {
+            "completed": progress.completed,
+            "total": progress.total,
+            "remaining": remaining,
+            "elapsed_seconds": elapsed,
+            "estimated_remaining_seconds": estimated_remaining,
+        }
 
     def complete_final_validation(
         self,
@@ -396,6 +450,9 @@ class FinalValidationReporter:
 
     def start(self, message: str) -> None:
         self.state.start_final_validation(message)
+
+    def operation_progress(self, completed: int, total: int) -> None:
+        self.state.update_final_validation_progress(completed, total)
 
     def ready_to_commit(self, dryrun_path: Path) -> None:
         self.state.ready_to_commit(dryrun_path)
@@ -883,10 +940,11 @@ def final_validation_payload(
     summary: str,
     details: str,
     dryrun_path: str,
+    progress: Mapping[str, object] | None = None,
     index: int,
     total: int,
 ) -> Mapping[str, object]:
-    return {
+    payload = {
         "done": False,
         "final_validation": True,
         "validation_status": status,
@@ -898,6 +956,9 @@ def final_validation_payload(
         "index": index,
         "total": total,
     }
+    if progress is not None:
+        payload["validation_progress"] = progress
+    return payload
 
 
 def reviewed_decisions(reviewed: Sequence[ReviewedAlbum]) -> dict[str, PlaceIdentification]:
@@ -1448,6 +1509,30 @@ HTML = """<!doctype html>
       margin: 0 0 18px;
       font-weight: 650;
     }
+    .validation-progress {
+      display: grid;
+      gap: 8px;
+      max-width: 560px;
+      margin: -2px 0 18px;
+    }
+    .validation-progress-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .validation-progress-count {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 650;
+    }
+    .validation-progress .progress-track {
+      max-width: none;
+      height: 10px;
+    }
     .validation-screen.failed .validation-panel {
       border-color: rgba(185, 28, 28, 0.42);
       background: var(--danger-bg);
@@ -1842,6 +1927,67 @@ HTML = """<!doctype html>
       fill.style.width = `${percent}%`;
     }
 
+    function renderValidationProgress(panel) {
+      const progress = current.validation_progress || null;
+      const total = Math.max(0, Number((progress && progress.total) || 0));
+      if (!total) return;
+
+      const completed = Math.max(0, Math.min(total, Number(progress.completed || 0)));
+      const remaining = Math.max(0, Number(progress.remaining || total - completed));
+      const elapsed = Math.max(0, Number(progress.elapsed_seconds || 0));
+      const estimated = progress.estimated_remaining_seconds;
+      const percent = Math.max(0, Math.min(100, (completed / total) * 100));
+
+      const root = document.createElement('div');
+      root.className = 'validation-progress';
+      root.setAttribute('aria-label', 'Operation progress');
+
+      const row = document.createElement('div');
+      row.className = 'validation-progress-row';
+
+      const count = document.createElement('span');
+      count.className = 'validation-progress-count';
+      count.textContent = `${completed}/${total} ${pluralizeWord(total, 'operation')}`;
+      row.appendChild(count);
+
+      const meta = document.createElement('span');
+      const hasEstimate = estimated !== null && estimated !== undefined && Number.isFinite(Number(estimated));
+      const etaText = hasEstimate
+        ? `est. ${formatDuration(Number(estimated))} remaining`
+        : 'est. calculating';
+      meta.textContent = `${remaining} ${pluralizeWord(remaining, 'operation')} remaining · ${formatDuration(elapsed)} elapsed · ${etaText}`;
+      row.appendChild(meta);
+
+      const track = document.createElement('div');
+      track.className = 'progress-track';
+      track.setAttribute('role', 'progressbar');
+      track.setAttribute('aria-valuemin', '0');
+      track.setAttribute('aria-valuemax', String(total));
+      track.setAttribute('aria-valuenow', String(completed));
+      const fill = document.createElement('span');
+      fill.className = 'progress-fill';
+      fill.style.width = `${percent}%`;
+      track.appendChild(fill);
+
+      root.appendChild(row);
+      root.appendChild(track);
+      panel.appendChild(root);
+    }
+
+    function pluralizeWord(count, word) {
+      return `${word}${count === 1 ? '' : 's'}`;
+    }
+
+    function formatDuration(seconds) {
+      const totalSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const remainingSeconds = totalSeconds % 60;
+      if (hours) return `${hours}h ${minutes}m ${remainingSeconds}s`;
+      if (minutes) return `${minutes}m ${remainingSeconds}s`;
+      return `${remainingSeconds}s`;
+    }
+
     function resetGalleryObserver() {
       if (galleryObserver) {
         galleryObserver.disconnect();
@@ -2198,6 +2344,10 @@ HTML = """<!doctype html>
         statusLine.textContent = 'Do not delete the original source folder';
       }
       panel.appendChild(statusLine);
+
+      if (status === 'pending') {
+        renderValidationProgress(panel);
+      }
 
       if (current.validation_dryrun_path) {
         const dryrun = document.createElement('pre');

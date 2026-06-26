@@ -149,6 +149,23 @@ class ReviewUiTests(unittest.TestCase):
         self.assertEqual(committed["validation_status"], "pending")
         self.assertTrue(state.commit_requested.is_set())
 
+        state.update_final_validation_progress(0, 4)
+        progress_payload = state.payload()
+        progress = progress_payload["validation_progress"]
+        self.assertEqual(progress["completed"], 0)
+        self.assertEqual(progress["total"], 4)
+        self.assertEqual(progress["remaining"], 4)
+        self.assertIsNone(progress["estimated_remaining_seconds"])
+
+        state.update_final_validation_progress(1, 4)
+        progress_payload = state.payload()
+        progress = progress_payload["validation_progress"]
+        self.assertEqual(progress["completed"], 1)
+        self.assertEqual(progress["total"], 4)
+        self.assertEqual(progress["remaining"], 3)
+        self.assertGreaterEqual(progress["elapsed_seconds"], 0)
+        self.assertIsNotNone(progress["estimated_remaining_seconds"])
+
         state.complete_final_validation(
             success=False,
             title="Validation failed",

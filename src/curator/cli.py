@@ -448,7 +448,17 @@ def handle_generated_plan(
         if validation_reporter is not None:
             validation_reporter.start("Curator is copying files, then checking checksums, file totals, and filenames.")
 
-        results = apply_plan(plan, log_root=default_log_root, progress=progress)
+        operation_progress = (
+            getattr(validation_reporter, "operation_progress", None)
+            if validation_reporter is not None
+            else None
+        )
+        results = apply_plan(
+            plan,
+            log_root=default_log_root,
+            progress=progress,
+            operation_progress=operation_progress,
+        )
         print(f"Applied {len(results)} operation(s).")
         if plan.metadata.get("kind") == "organize" and plan.metadata.get("transfer") == "copy":
             report = verify_organize_copy_plan(plan, progress=progress)
