@@ -48,13 +48,15 @@ class ReviewedAlbum:
 class FinalReviewResult:
     decisions: dict[str, PlaceIdentification]
     image_locations: dict[str, PlaceIdentification]
+    validation_reporter: FinalValidationReporter | None = None
 
 
 class ReviewState:
-    def __init__(self, items: Sequence[ReviewItem]) -> None:
+    def __init__(self, items: Sequence[ReviewItem], *, wait_for_final_validation: bool = False) -> None:
         self.items = list(items)
         self.items_by_group_id = {item.identification.group_id: item for item in self.items}
         self.index = 0
+        self.wait_for_final_validation = wait_for_final_validation
         self.decisions: dict[str, PlaceIdentification] = {}
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
@@ -68,11 +70,30 @@ class ReviewState:
         self.reviewed: list[ReviewedAlbum] = []
         self.image_locations: dict[str, PlaceIdentification] = {}
         self.final_ready = False
+        self.final_validation_status: str | None = None
+        self.final_validation_title = ""
+        self.final_validation_message = ""
+        self.final_validation_summary = ""
+        self.final_validation_details = ""
+        self.final_validation_seen = threading.Event()
         self.done = threading.Event()
         self.lock = threading.Lock()
 
     def payload(self, image_url_builder: ImageUrlBuilder | None = None) -> Mapping[str, object]:
         with self.lock:
+            if self.final_validation_status is not None:
+                payload = final_validation_payload(
+                    status=self.final_validation_status,
+                    title=self.final_validation_title,
+                    message=self.final_validation_message,
+                    summary=self.final_validation_summary,
+                    details=self.final_validation_details,
+                    index=self.index,
+                    total=len(self.items),
+                )
+                if self.final_validation_status in {"passed", "failed"}:
+                    self.final_validation_seen.set()
+                return payload
             if self.final_ready:
                 return final_review_payload(
                     self.reviewed,
@@ -224,18 +245,63 @@ class ReviewState:
             self.reviewed[index] = ReviewedAlbum(item=item, decision=reviewed_album.decision)
             set_initial_image_locations(self.image_locations, item, reviewed_album.decision)
 
-    def final_result(self) -> FinalReviewResult:
+    def final_result(self, validation_reporter: FinalValidationReporter | None = None) -> FinalReviewResult:
         with self.lock:
             return FinalReviewResult(
                 decisions=reviewed_decisions(self.reviewed),
                 image_locations=dict(self.image_locations),
+                validation_reporter=validation_reporter,
             )
 
     def approve_final_review(self) -> Mapping[str, object]:
         with self.lock:
+            if self.wait_for_final_validation:
+                self.final_ready = False
+                self.final_validation_status = "pending"
+                self.final_validation_title = "Copying and validating"
+                self.final_validation_message = "Curator is copying files, then checking checksums, file totals, and filenames."
+                self.final_validation_summary = ""
+                self.final_validation_details = ""
+                self.final_validation_seen.clear()
+                self.done.set()
+                return final_validation_payload(
+                    status=self.final_validation_status,
+                    title=self.final_validation_title,
+                    message=self.final_validation_message,
+                    summary=self.final_validation_summary,
+                    details=self.final_validation_details,
+                    index=self.index,
+                    total=len(self.items),
+                )
             self.final_ready = False
             self.done.set()
             return {"done": True, "index": self.index, "total": len(self.items)}
+
+    def start_final_validation(self, message: str) -> None:
+        with self.lock:
+            self.final_validation_status = "pending"
+            self.final_validation_title = "Copying and validating"
+            self.final_validation_message = message
+            self.final_validation_summary = ""
+            self.final_validation_details = ""
+            self.final_validation_seen.clear()
+
+    def complete_final_validation(
+        self,
+        *,
+        success: bool,
+        title: str,
+        message: str,
+        summary: str,
+        details: str = "",
+    ) -> None:
+        with self.lock:
+            self.final_validation_status = "passed" if success else "failed"
+            self.final_validation_title = title
+            self.final_validation_message = message
+            self.final_validation_summary = summary
+            self.final_validation_details = details
+            self.final_validation_seen.clear()
 
     def rename_album(
         self,
@@ -276,6 +342,58 @@ class ReviewState:
             )
 
 
+class FinalValidationReporter:
+    def __init__(
+        self,
+        state: ReviewState,
+        server: ThreadingHTTPServer,
+        thread: threading.Thread,
+        *,
+        seen_timeout_seconds: float = 30.0,
+    ) -> None:
+        self.state = state
+        self.server = server
+        self.thread = thread
+        self.seen_timeout_seconds = seen_timeout_seconds
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def start(self, message: str) -> None:
+        self.state.start_final_validation(message)
+
+    def succeed(self, summary: str) -> None:
+        self.state.complete_final_validation(
+            success=True,
+            title="Validation passed",
+            message="Curator verified the final copy against the source.",
+            summary=summary,
+        )
+        self.close_after_browser_sees_result()
+
+    def fail(self, summary: str, details: str = "") -> None:
+        self.state.complete_final_validation(
+            success=False,
+            title="Validation failed",
+            message="Do not delete the original source folder. Curator found files or metadata that did not line up.",
+            summary=summary,
+            details=details,
+        )
+        self.close_after_browser_sees_result()
+
+    def close_after_browser_sees_result(self) -> None:
+        self.state.final_validation_seen.wait(timeout=self.seen_timeout_seconds)
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
 def review_place_identifications_in_browser(
     items: Sequence[ReviewItem],
     *,
@@ -283,6 +401,7 @@ def review_place_identifications_in_browser(
     port: int = 0,
     open_browser: bool = True,
     state_ready: Callable[[ReviewState], None] | None = None,
+    wait_for_final_validation: bool = False,
 ) -> FinalReviewResult:
     if not items:
         return FinalReviewResult(decisions={}, image_locations={})
@@ -293,6 +412,7 @@ def review_place_identifications_in_browser(
         port=port,
         open_browser=open_browser,
         state_ready=state_ready,
+        wait_for_final_validation=wait_for_final_validation,
     )
 
 
@@ -303,17 +423,20 @@ def _review_place_identifications_in_browser(
     port: int = 0,
     open_browser: bool = True,
     state_ready: Callable[[ReviewState], None] | None = None,
+    wait_for_final_validation: bool = False,
 ) -> FinalReviewResult:
     if not items:
         return FinalReviewResult(decisions={}, image_locations={})
 
-    state = ReviewState(items)
+    state = ReviewState(items, wait_for_final_validation=wait_for_final_validation)
     handler = make_handler(state)
     server = ThreadingHTTPServer((host, port), handler)
     actual_host, actual_port = server.server_address
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://{actual_host}:{actual_port}/"
+    shutdown_server = True
+    validation_reporter: FinalValidationReporter | None = None
 
     try:
         if state_ready:
@@ -322,12 +445,16 @@ def _review_place_identifications_in_browser(
             webbrowser.open(url)
         print(f"Review UI: {url}")
         state.done.wait()
+        if wait_for_final_validation:
+            validation_reporter = FinalValidationReporter(state, server, thread)
+            shutdown_server = False
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        if shutdown_server:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
-    return state.final_result()
+    return state.final_result(validation_reporter=validation_reporter)
 
 
 class BrowserReviewSession:
@@ -706,6 +833,29 @@ def final_review_payload(
     }
 
 
+def final_validation_payload(
+    *,
+    status: str,
+    title: str,
+    message: str,
+    summary: str,
+    details: str,
+    index: int,
+    total: int,
+) -> Mapping[str, object]:
+    return {
+        "done": False,
+        "final_validation": True,
+        "validation_status": status,
+        "validation_title": title,
+        "validation_message": message,
+        "validation_summary": summary,
+        "validation_details": details,
+        "index": index,
+        "total": total,
+    }
+
+
 def reviewed_decisions(reviewed: Sequence[ReviewedAlbum]) -> dict[str, PlaceIdentification]:
     return {album.decision.group_id: album.decision for album in reviewed}
 
@@ -1030,6 +1180,8 @@ HTML = """<!doctype html>
       --progress: #16a34a;
       --progress-track: #dceade;
       --success: #15803d;
+      --danger: #b91c1c;
+      --danger-bg: #fef2f2;
       --finder-blue: #0a84ff;
       --finder-blue-ring: rgba(10, 132, 255, 0.34);
       --panel: #ffffff;
@@ -1220,6 +1372,57 @@ HTML = """<!doctype html>
       background: var(--success);
       color: #fff;
       box-shadow: 0 12px 28px rgba(21, 128, 61, 0.25);
+    }
+    .validation-screen {
+      max-width: 880px;
+      margin: 64px auto;
+      padding: 0 18px;
+      display: block;
+    }
+    .validation-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 24px;
+    }
+    .validation-panel h1 {
+      font-size: 24px;
+      margin: 0 0 8px;
+    }
+    .validation-panel p {
+      margin: 0 0 16px;
+      color: var(--muted);
+    }
+    .validation-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 28px;
+      margin: 0 0 18px;
+      font-weight: 650;
+    }
+    .validation-screen.failed .validation-panel {
+      border-color: rgba(185, 28, 28, 0.42);
+      background: var(--danger-bg);
+    }
+    .validation-screen.failed .validation-status,
+    .validation-screen.failed h1 {
+      color: var(--danger);
+    }
+    .validation-screen.passed .validation-status,
+    .validation-screen.passed h1 {
+      color: var(--success);
+    }
+    .validation-output {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      margin: 12px 0 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      font: 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
     .move-controls {
       position: fixed;
@@ -1488,6 +1691,15 @@ HTML = """<!doctype html>
         closeExpandedImage(false);
         resetGalleryObserver();
         document.body.innerHTML = '<div class="done"><h1>All groups reviewed</h1><p>You can return to the terminal.</p></div>';
+        return;
+      }
+      if (current.final_validation) {
+        closeExpandedImage(false);
+        resetGalleryObserver();
+        renderFinalValidation();
+        if (current.validation_status === 'pending') {
+          setTimeout(loadState, 900);
+        }
         return;
       }
       if (current.final_review) {
@@ -1905,6 +2117,52 @@ HTML = """<!doctype html>
       actions.appendChild(button);
       main.appendChild(actions);
       renderMoveControls(main);
+      document.body.appendChild(main);
+    }
+
+    function renderFinalValidation() {
+      document.body.innerHTML = '';
+      const status = current.validation_status || 'pending';
+      const main = document.createElement('main');
+      main.className = `validation-screen ${status}`;
+
+      const panel = document.createElement('section');
+      panel.className = 'validation-panel';
+
+      const title = document.createElement('h1');
+      title.textContent = current.validation_title || 'Validating final copy';
+      panel.appendChild(title);
+
+      const message = document.createElement('p');
+      message.textContent = current.validation_message || '';
+      panel.appendChild(message);
+
+      const statusLine = document.createElement('div');
+      statusLine.className = 'validation-status';
+      if (status === 'pending') {
+        statusLine.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Waiting for CLI validation...</span>';
+      } else if (status === 'passed') {
+        statusLine.textContent = 'All final checks passed';
+      } else {
+        statusLine.textContent = 'Do not delete the original source folder';
+      }
+      panel.appendChild(statusLine);
+
+      if (current.validation_summary) {
+        const summary = document.createElement('pre');
+        summary.className = 'validation-output';
+        summary.textContent = current.validation_summary;
+        panel.appendChild(summary);
+      }
+
+      if (current.validation_details) {
+        const details = document.createElement('pre');
+        details.className = 'validation-output';
+        details.textContent = current.validation_details;
+        panel.appendChild(details);
+      }
+
+      main.appendChild(panel);
       document.body.appendChild(main);
     }
 

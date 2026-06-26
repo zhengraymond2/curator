@@ -81,6 +81,18 @@ LIBRARY_ROOT=/path/to/library ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
 PYTHON_BIN="$(which python3)" ./scripts/review-dryrun "/Volumes/LaCie 1/CRG"
 ```
 
+Run the same reviewed flow as a real copy with:
+
+```sh
+LIBRARY_ROOT=/path/to/library ./scripts/review "/Volumes/LaCie 1/CRG"
+```
+
+The non-dry-run script creates `SOURCE_DIR/.lock` before copying. On macOS it
+tries to mark that lock file immutable so accidental source-folder deletion
+fails until you remove the lock. At the end of an applied organize copy, Curator
+verifies source/final checksums, file totals, and filename sets. If any check
+fails, it prints a large red error and exits non-zero.
+
 ## LLM Place Identification
 
 The agentic place-identification stage lives in `curator.place_identification`. It samples

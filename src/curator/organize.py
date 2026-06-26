@@ -76,6 +76,7 @@ def build_organize_plan(
     identify_places: bool = False,
     review_unknown_places: bool = False,
     review_ui: bool = False,
+    wait_for_final_validation: bool = False,
     unknown_place_reviewer: UnknownPlaceReviewer | None = None,
     place_identifier: OpenRouterPlaceIdentifier | None = None,
     place_identifications: Mapping[str, PlaceIdentification] | None = None,
@@ -125,6 +126,7 @@ def build_organize_plan(
 
     identifications = dict(place_identifications or {})
     image_identifications: dict[str, PlaceIdentification] = {}
+    review_validation_reporter = None
     if identify_places:
         identified_places = identify_bundle_places(
             bundles,
@@ -132,6 +134,7 @@ def build_organize_plan(
             identifier=place_identifier,
             review_unknown_places=review_unknown_places,
             review_ui=review_ui,
+            wait_for_final_validation=wait_for_final_validation,
             unknown_place_reviewer=unknown_place_reviewer,
             progress=progress,
         )
@@ -139,6 +142,7 @@ def build_organize_plan(
         if isinstance(identified_places, FinalReviewResult) or isinstance(final_decisions, dict):
             identifications.update(final_decisions or {})
             image_identifications.update(getattr(identified_places, "image_locations", {}) or {})
+            review_validation_reporter = getattr(identified_places, "validation_reporter", None)
         else:
             identifications.update(identified_places)
 
@@ -199,6 +203,7 @@ def build_organize_plan(
             "timestamp_source": "exiftool_then_sips_then_mdls_then_filesystem_mtime",
             "metadata_cache": str(timestamp_cache),
         },
+        runtime={"review_validation_reporter": review_validation_reporter} if review_validation_reporter else None,
     )
 
 
@@ -339,12 +344,19 @@ def identify_bundle_places(
     identifier: OpenRouterPlaceIdentifier | None = None,
     review_unknown_places: bool = False,
     review_ui: bool = False,
+    wait_for_final_validation: bool = False,
     unknown_place_reviewer: UnknownPlaceReviewer | None = None,
     progress: ProgressReporter | None = None,
 ) -> dict[str, PlaceIdentification] | FinalReviewResult:
     progress = progress or ProgressReporter.disabled()
     if review_ui:
-        return identify_bundle_places_with_review_ui(bundles, timestamps, identifier=identifier, progress=progress)
+        return identify_bundle_places_with_review_ui(
+            bundles,
+            timestamps,
+            identifier=identifier,
+            progress=progress,
+            wait_for_final_validation=wait_for_final_validation,
+        )
 
     identifier = identifier or OpenRouterPlaceIdentifier()
     preprocessor = ImagePreprocessor()
@@ -378,6 +390,7 @@ def identify_bundle_places_with_review_ui(
     *,
     identifier: OpenRouterPlaceIdentifier | None = None,
     progress: ProgressReporter | None = None,
+    wait_for_final_validation: bool = False,
 ) -> FinalReviewResult:
     progress = progress or ProgressReporter.disabled()
     identifier = identifier or OpenRouterPlaceIdentifier()
@@ -421,7 +434,11 @@ def identify_bundle_places_with_review_ui(
             progress=progress,
         )
 
-    return review_place_identifications_in_browser(items, state_ready=start_background_work)
+    return review_place_identifications_in_browser(
+        items,
+        state_ready=start_background_work,
+        wait_for_final_validation=wait_for_final_validation,
+    )
 
 
 def place_photo_candidates(bundle: MediaBundle, timestamps: Mapping[Path, object]) -> list[PhotoCandidate]:

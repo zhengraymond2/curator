@@ -40,6 +40,7 @@ class Plan:
     operations: list[Operation]
     version: int = PLAN_VERSION
     metadata: dict[str, Any] = field(default_factory=dict)
+    runtime: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +78,7 @@ def make_plan(
     description: str,
     operations: Iterable[Operation],
     metadata: dict[str, Any] | None = None,
+    runtime: dict[str, Any] | None = None,
 ) -> Plan:
     return Plan(
         run_id=run_id,
@@ -84,6 +86,7 @@ def make_plan(
         created_at=utc_now_iso(),
         metadata=metadata or {},
         operations=list(operations),
+        runtime=runtime or {},
     )
 
 
@@ -95,4 +98,3 @@ def write_plan(plan: Plan, path: Path) -> Path:
 
 def read_plan(path: Path) -> Plan:
     return Plan.from_dict(json.loads(path.read_text(encoding="utf-8")))
-
