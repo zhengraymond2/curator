@@ -28,7 +28,7 @@ from .place_identification import (
 )
 from .plan import Operation, Plan, make_plan, new_run_id
 from .progress import ProgressReporter
-from .review_ui import BrowserReviewSession, LocationSuggestion, ReviewItem, SequentialReviewState
+from .review_ui import BrowserReviewSession, FinalReviewResult, LocationSuggestion, ReviewItem, SequentialReviewState
 from .scan import MediaFile, scan_media
 
 SHOOT_GAP_SECONDS = 60 * 60
@@ -118,18 +118,23 @@ def build_organize_plan(
         bundles = build_media_bundles(source, timestamped_files, timestamps)
 
     identifications = dict(place_identifications or {})
+    image_identifications: dict[str, PlaceIdentification] = {}
     if identify_places:
-        identifications.update(
-            identify_bundle_places(
-                bundles,
-                timestamps,
-                identifier=place_identifier,
-                review_unknown_places=review_unknown_places,
-                review_ui=review_ui,
-                unknown_place_reviewer=unknown_place_reviewer,
-                progress=progress,
-            )
+        identified_places = identify_bundle_places(
+            bundles,
+            timestamps,
+            identifier=place_identifier,
+            review_unknown_places=review_unknown_places,
+            review_ui=review_ui,
+            unknown_place_reviewer=unknown_place_reviewer,
+            progress=progress,
         )
+        final_decisions = getattr(identified_places, "decisions", None)
+        if isinstance(identified_places, FinalReviewResult) or isinstance(final_decisions, dict):
+            identifications.update(final_decisions or {})
+            image_identifications.update(getattr(identified_places, "image_locations", {}) or {})
+        else:
+            identifications.update(identified_places)
 
     with progress.step(
         "Building organize operations",
@@ -137,11 +142,15 @@ def build_organize_plan(
     ):
         bundle_destinations = assign_bundle_destination_names(bundles, identifications)
         for bundle in bundles:
-            country_name, folder_name = bundle_destinations[bundle.group_id]
             for media in bundle.media:
+                image_identification = image_identifications.get(str(media.path))
+                if image_identification is None:
+                    country_name, folder_name = bundle_destinations[bundle.group_id]
+                else:
+                    country_name, folder_name = bundle_destination_names(bundle, image_identification)
                 captured = timestamps[media.path]
                 dest = originals / country_name / folder_name / media.path.name
-                place_identification = identifications.get(bundle.group_id)
+                place_identification = image_identification or identifications.get(bundle.group_id)
                 operations.append(
                     Operation(
                         type=transfer,
@@ -326,7 +335,7 @@ def identify_bundle_places(
     review_ui: bool = False,
     unknown_place_reviewer: UnknownPlaceReviewer | None = None,
     progress: ProgressReporter | None = None,
-) -> dict[str, PlaceIdentification]:
+) -> dict[str, PlaceIdentification] | FinalReviewResult:
     progress = progress or ProgressReporter.disabled()
     if review_ui:
         return identify_bundle_places_with_review_ui(bundles, timestamps, identifier=identifier, progress=progress)
@@ -363,7 +372,7 @@ def identify_bundle_places_with_review_ui(
     *,
     identifier: OpenRouterPlaceIdentifier | None = None,
     progress: ProgressReporter | None = None,
-) -> dict[str, PlaceIdentification]:
+) -> FinalReviewResult:
     progress = progress or ProgressReporter.disabled()
     identifier = identifier or OpenRouterPlaceIdentifier()
     model_preprocessor = ImagePreprocessor()
@@ -422,7 +431,10 @@ def identify_bundle_places_with_review_ui(
                 debug=True,
             )
 
-    return results
+        progress.log("Waiting for final browser review approval")
+        final_review = session.finalize()
+
+    return final_review
 
 
 def place_photo_candidates(bundle: MediaBundle, timestamps: Mapping[Path, object]) -> list[PhotoCandidate]:

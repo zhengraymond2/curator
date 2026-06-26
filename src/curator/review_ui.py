@@ -6,7 +6,7 @@ import webbrowser
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from .place_identification import PlaceIdentification, PreparedImage
 
@@ -31,6 +31,18 @@ class ReviewItem:
     llm_pending: bool = False
 
 
+@dataclass(frozen=True)
+class ReviewedAlbum:
+    item: ReviewItem
+    decision: PlaceIdentification
+
+
+@dataclass(frozen=True)
+class FinalReviewResult:
+    decisions: dict[str, PlaceIdentification]
+    image_locations: dict[str, PlaceIdentification]
+
+
 class ReviewState:
     def __init__(self, items: Sequence[ReviewItem]) -> None:
         self.items = list(items)
@@ -38,11 +50,16 @@ class ReviewState:
         self.decisions: dict[str, PlaceIdentification] = {}
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
+        self.reviewed: list[ReviewedAlbum] = []
+        self.image_locations: dict[str, PlaceIdentification] = {}
+        self.final_ready = False
         self.done = threading.Event()
         self.lock = threading.Lock()
 
     def payload(self) -> Mapping[str, object]:
         with self.lock:
+            if self.final_ready:
+                return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
             if self.index >= len(self.items):
                 return {"done": True, "index": self.index, "total": len(self.items)}
             return review_item_payload(
@@ -76,10 +93,12 @@ class ReviewState:
                 rationale=f"User reviewed location: {country}/{place}",
             )
             self.decisions[original.group_id] = reviewed
+            self.reviewed.append(ReviewedAlbum(item=item, decision=reviewed))
+            set_initial_image_locations(self.image_locations, item, reviewed)
             self.index += 1
             if self.index >= len(self.items):
-                self.done.set()
-                return {"done": True}
+                self.final_ready = True
+                return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
             return review_item_payload(
                 self.items[self.index],
                 self.index,
@@ -96,6 +115,23 @@ class ReviewState:
     def store_llm_error(self, group_id: str, error: Exception) -> None:
         with self.lock:
             self.llm_errors[group_id] = str(error)
+
+    def approve_final_review(self) -> Mapping[str, object]:
+        with self.lock:
+            self.final_ready = False
+            self.done.set()
+            return {"done": True, "index": self.index, "total": len(self.items)}
+
+    def rename_album(self, target_key: str, folder_name: str) -> Mapping[str, object]:
+        with self.lock:
+            rename_reviewed_album(self.reviewed, self.image_locations, target_key, folder_name)
+            self.decisions = reviewed_decisions(self.reviewed)
+            return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
+
+    def move_images(self, paths: Sequence[str], target_key: str, folder_name: str) -> Mapping[str, object]:
+        with self.lock:
+            move_reviewed_images(self.image_locations, paths, target_key, folder_name)
+            return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
 
 
 def review_place_identifications_in_browser(
@@ -162,6 +198,9 @@ class BrowserReviewSession:
     def review(self, item: ReviewItem, *, index: int) -> PlaceIdentification:
         return self.state.review(item, index=index)
 
+    def finalize(self) -> FinalReviewResult:
+        return self.state.finalize()
+
 
 class SequentialReviewState:
     def __init__(self, total: int) -> None:
@@ -171,6 +210,10 @@ class SequentialReviewState:
         self.decision: PlaceIdentification | None = None
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
+        self.reviewed: list[ReviewedAlbum] = []
+        self.image_locations: dict[str, PlaceIdentification] = {}
+        self.final_ready = False
+        self.final_done = threading.Event()
         self.item_ready = threading.Event()
         self.item_done = threading.Event()
         self.done = threading.Event()
@@ -193,6 +236,8 @@ class SequentialReviewState:
         with self.lock:
             if self.done.is_set():
                 return {"done": True, "index": self.index, "total": self.total}
+            if self.final_ready:
+                return final_review_payload(self.reviewed, self.image_locations, self.index, self.total)
             if self.current is None:
                 return {"loading": True, "done": False, "index": self.index, "total": self.total}
             return review_item_payload(
@@ -223,6 +268,8 @@ class SequentialReviewState:
                 is_unknown=False if place and not place.casefold().startswith("unknown") else original.is_unknown,
                 rationale=f"User reviewed location: {country}/{place}",
             )
+            self.reviewed.append(ReviewedAlbum(item=item, decision=self.decision))
+            set_initial_image_locations(self.image_locations, item, self.decision)
             self.current = None
             self.item_ready.clear()
             self.item_done.set()
@@ -238,10 +285,44 @@ class SequentialReviewState:
         with self.lock:
             self.llm_errors[group_id] = str(error)
 
+    def finalize(self) -> FinalReviewResult:
+        with self.lock:
+            self.current = None
+            self.index = self.total
+            self.final_ready = True
+            self.item_ready.set()
+        self.final_done.wait()
+        with self.lock:
+            return FinalReviewResult(
+                decisions=reviewed_decisions(self.reviewed),
+                image_locations=dict(self.image_locations),
+            )
+
+    def approve_final_review(self) -> Mapping[str, object]:
+        with self.lock:
+            self.final_ready = False
+            self.done.set()
+            self.final_done.set()
+            self.item_ready.set()
+            self.item_done.set()
+            return {"done": True, "index": self.index, "total": self.total}
+
+    def rename_album(self, target_key: str, folder_name: str) -> Mapping[str, object]:
+        with self.lock:
+            rename_reviewed_album(self.reviewed, self.image_locations, target_key, folder_name)
+            return final_review_payload(self.reviewed, self.image_locations, self.index, self.total)
+
+    def move_images(self, paths: Sequence[str], target_key: str, folder_name: str) -> Mapping[str, object]:
+        with self.lock:
+            move_reviewed_images(self.image_locations, paths, target_key, folder_name)
+            return final_review_payload(self.reviewed, self.image_locations, self.index, self.total)
+
     def finish(self) -> None:
         with self.lock:
             self.current = None
+            self.final_ready = False
             self.done.set()
+            self.final_done.set()
             self.item_ready.set()
             self.item_done.set()
 
@@ -297,6 +378,163 @@ def review_item_payload(
     }
 
 
+def final_review_payload(
+    reviewed: Sequence[ReviewedAlbum],
+    image_locations: Mapping[str, PlaceIdentification],
+    index: int,
+    total: int,
+) -> Mapping[str, object]:
+    albums: dict[tuple[str, str], dict[str, object]] = {}
+    for reviewed_album in reviewed:
+        for image in reviewed_album.item.prepared_images:
+            image_path = str(image.source_path)
+            decision = image_locations.get(image_path, reviewed_album.decision)
+            key = (decision.country_or_region, decision.place_name)
+            album = albums.setdefault(
+                key,
+                {
+                    "key": album_key(*key),
+                    "country_or_region": decision.country_or_region,
+                    "place_name": decision.place_name,
+                    "images": [],
+                },
+            )
+            images = album["images"]
+            assert isinstance(images, list)
+            images.append(
+                {
+                    "src": image.data_url,
+                    "filename": image.source_path.name,
+                    "path": image_path,
+                    "group_id": decision.group_id,
+                    "album_key": album["key"],
+                    "prepared_size": image.prepared_size,
+                    "encoded_bytes": image.encoded_bytes,
+                }
+            )
+    return {
+        "done": False,
+        "final_review": True,
+        "index": index,
+        "total": total,
+        "albums": list(albums.values()),
+    }
+
+
+def reviewed_decisions(reviewed: Sequence[ReviewedAlbum]) -> dict[str, PlaceIdentification]:
+    return {album.decision.group_id: album.decision for album in reviewed}
+
+
+def set_initial_image_locations(
+    image_locations: dict[str, PlaceIdentification],
+    item: ReviewItem,
+    decision: PlaceIdentification,
+) -> None:
+    for image in item.prepared_images:
+        image_locations[str(image.source_path)] = decision
+
+
+def rename_reviewed_album(
+    reviewed: list[ReviewedAlbum],
+    image_locations: dict[str, PlaceIdentification],
+    target_key: str,
+    folder_name: str,
+) -> None:
+    for index, reviewed_album in enumerate(reviewed):
+        decision = reviewed_album.decision
+        if album_key(decision.country_or_region, decision.place_name) != target_key:
+            continue
+        country, place = resolve_album_name(folder_name, decision)
+        updated = updated_final_decision(decision, country, place)
+        reviewed[index] = ReviewedAlbum(item=reviewed_album.item, decision=updated)
+    for path, decision in list(image_locations.items()):
+        if album_key(decision.country_or_region, decision.place_name) != target_key:
+            continue
+        country, place = resolve_album_name(folder_name, decision)
+        image_locations[path] = updated_final_decision(decision, country, place)
+
+
+def move_reviewed_images(
+    image_locations: dict[str, PlaceIdentification],
+    paths: Sequence[str],
+    target_key: str,
+    folder_name: str,
+) -> None:
+    selected = [path for path in paths if path in image_locations]
+    if not selected:
+        return
+    target = location_for_album_key(image_locations.values(), target_key)
+    if target is None:
+        target = location_for_album_name(image_locations.values(), folder_name)
+    if target is None:
+        country, place = resolve_album_name(folder_name, image_locations[selected[0]])
+    else:
+        country, place = target
+    for path in selected:
+        image_locations[path] = updated_final_decision(
+            image_locations[path],
+            country,
+            place,
+            rationale_prefix="User moved image in final review",
+        )
+
+
+def location_for_album_key(decisions: Iterable[PlaceIdentification], target_key: str) -> tuple[str, str] | None:
+    if not target_key:
+        return None
+    for decision in decisions:
+        if not isinstance(decision, PlaceIdentification):
+            continue
+        if album_key(decision.country_or_region, decision.place_name) == target_key:
+            return decision.country_or_region, decision.place_name
+    return None
+
+
+def location_for_album_name(decisions: Iterable[PlaceIdentification], folder_name: str) -> tuple[str, str] | None:
+    normalized = normalize_text(folder_name)
+    if not normalized:
+        return None
+    for decision in decisions:
+        if not isinstance(decision, PlaceIdentification):
+            continue
+        label = f"{decision.country_or_region}/{decision.place_name}"
+        if normalize_text(decision.place_name) == normalized or normalize_text(label) == normalized:
+            return decision.country_or_region, decision.place_name
+    return None
+
+
+def updated_final_decision(
+    decision: PlaceIdentification,
+    country: str,
+    place: str,
+    *,
+    rationale_prefix: str = "User renamed final album",
+) -> PlaceIdentification:
+    return replace(
+        decision,
+        country_or_region=country,
+        place_name=place,
+        confidence=1.0,
+        is_unknown=False if place and not place.casefold().startswith("unknown") else decision.is_unknown,
+        rationale=f"{rationale_prefix}: {country}/{place}",
+    )
+
+
+def resolve_album_name(folder_name: str, original: PlaceIdentification) -> tuple[str, str]:
+    value = folder_name.strip()
+    if "/" in value:
+        country, _, place = value.partition("/")
+        country = country.strip()
+        place = place.strip()
+        if country and place:
+            return country, place
+    return original.country_or_region, value or original.place_name
+
+
+def album_key(country_or_region: str, place_name: str) -> str:
+    return f"{normalize_text(country_or_region)}\n{normalize_text(place_name)}"
+
+
 def resolve_location(
     country_or_region: str | None,
     place_name: str | None,
@@ -338,15 +576,39 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
             self.send_error(404)
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path != "/api/decision":
+            if self.path == "/api/final/approve":
+                self.send_json(state.approve_final_review())
+                return
+
+            if self.path not in {"/api/decision", "/api/final/album", "/api/final/move"}:
                 self.send_error(404)
                 return
+
             length = int(self.headers.get("Content-Length", "0"))
             raw_body = self.rfile.read(length).decode("utf-8")
             try:
                 payload = json.loads(raw_body or "{}")
             except json.JSONDecodeError:
                 self.send_error(400, "invalid JSON")
+                return
+            if self.path == "/api/final/album":
+                self.send_json(
+                    state.rename_album(
+                        str(payload.get("album_key") or ""),
+                        str(payload.get("place_name") or ""),
+                    )
+                )
+                return
+            if self.path == "/api/final/move":
+                raw_paths = payload.get("paths")
+                paths = [str(path) for path in raw_paths] if isinstance(raw_paths, list) else []
+                self.send_json(
+                    state.move_images(
+                        paths,
+                        str(payload.get("album_key") or ""),
+                        str(payload.get("place_name") or ""),
+                    )
+                )
                 return
             self.send_json(
                 state.decide(
@@ -389,6 +651,7 @@ HTML = """<!doctype html>
       --accent-ink: #ffffff;
       --progress: #16a34a;
       --progress-track: #dceade;
+      --success: #15803d;
       --panel: #ffffff;
     }
     * { box-sizing: border-box; }
@@ -520,6 +783,84 @@ HTML = """<!doctype html>
       gap: 8px;
       align-content: start;
     }
+    .final-review {
+      display: block;
+      padding: 20px 18px 84px;
+    }
+    .final-review > h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+    }
+    .final-review > p {
+      margin: 0 0 18px;
+      color: var(--muted);
+    }
+    .album-section {
+      margin: 0 0 28px;
+    }
+    .album-heading {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 0 0 10px;
+    }
+    .album-heading h2 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .album-name {
+      cursor: text;
+      border-bottom: 1px dashed transparent;
+    }
+    .album-name:hover,
+    .album-name:focus {
+      border-bottom-color: var(--accent);
+      color: var(--accent);
+    }
+    .album-name-input {
+      max-width: min(560px, 100%);
+      height: 34px;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .album-heading span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .final-actions {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 10;
+    }
+    .looks-good {
+      min-width: 128px;
+      border-color: var(--success);
+      background: var(--success);
+      color: #fff;
+      box-shadow: 0 12px 28px rgba(21, 128, 61, 0.25);
+    }
+    .move-controls {
+      position: fixed;
+      left: 18px;
+      bottom: 18px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .move-panel {
+      position: relative;
+      width: min(360px, calc(100vw - 36px));
+    }
+    .move-panel input {
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+    }
+    .move-suggestions {
+      top: auto;
+      bottom: 42px;
+    }
     .gallery figure {
       margin: 0;
       background: var(--panel);
@@ -541,6 +882,18 @@ HTML = """<!doctype html>
     }
     .gallery figure:hover {
       transform: translateY(-1px);
+    }
+    figure.image-tile {
+      cursor: pointer;
+      outline: 0;
+    }
+    figure.image-tile:hover,
+    figure.image-tile:focus {
+      border-color: var(--accent);
+    }
+    figure.image-tile.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.24);
     }
     .gallery figure img {
       display: block;
@@ -713,6 +1066,10 @@ HTML = """<!doctype html>
     let galleryRenderedCount = 0;
     let selectedImageIndex = -1;
     let expandedView = null;
+    let selectedPaths = new Set();
+    let lastSelectedIndex = null;
+    let movePanelOpen = false;
+    let activeMoveSuggestion = null;
 
     async function loadState() {
       const response = await fetch('/api/state');
@@ -735,6 +1092,10 @@ HTML = """<!doctype html>
         closeExpandedImage(false);
         resetGalleryObserver();
         document.body.innerHTML = '<div class="done"><h1>All groups reviewed</h1><p>You can return to the terminal.</p></div>';
+        return;
+      }
+      if (current.final_review) {
+        renderFinalReview();
         return;
       }
       if (current.loading) {
@@ -1009,6 +1370,302 @@ HTML = """<!doctype html>
       return target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
     }
 
+    function renderFinalReview() {
+      document.body.innerHTML = '';
+      pruneSelectedPaths();
+      const main = document.createElement('main');
+      main.className = 'final-review';
+
+      const title = document.createElement('h1');
+      title.textContent = 'Final review';
+      main.appendChild(title);
+
+      const summary = document.createElement('p');
+      const albumCount = (current.albums || []).length;
+      summary.textContent = `${albumCount} album${albumCount === 1 ? '' : 's'} ready`;
+      main.appendChild(summary);
+
+      let imageIndex = 0;
+      for (const album of current.albums || []) {
+        const section = document.createElement('section');
+        section.className = 'album-section';
+
+        const heading = document.createElement('div');
+        heading.className = 'album-heading';
+        const name = document.createElement('h2');
+        name.className = 'album-name';
+        name.tabIndex = 0;
+        name.title = 'Edit folder name';
+        name.textContent = album.place_name || 'Untitled album';
+        name.addEventListener('click', () => editAlbumName(album, name));
+        name.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            editAlbumName(album, name);
+          }
+        });
+        const country = document.createElement('span');
+        country.textContent = album.country_or_region || 'Unsorted';
+        heading.appendChild(name);
+        heading.appendChild(country);
+        section.appendChild(heading);
+
+        const gallery = document.createElement('div');
+        gallery.className = 'gallery';
+        for (const image of album.images || []) {
+          const currentIndex = imageIndex;
+          imageIndex += 1;
+          const figure = document.createElement('figure');
+          figure.className = `image-tile${selectedPaths.has(image.path) ? ' selected' : ''}`;
+          figure.tabIndex = 0;
+          figure.addEventListener('click', (event) => {
+            toggleImageSelection(image.path, currentIndex, event.shiftKey);
+          });
+          figure.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              toggleImageSelection(image.path, currentIndex, event.shiftKey);
+            }
+          });
+          const img = document.createElement('img');
+          img.src = image.src;
+          img.alt = image.filename;
+          const caption = document.createElement('figcaption');
+          caption.textContent = image.filename;
+          figure.appendChild(img);
+          figure.appendChild(caption);
+          gallery.appendChild(figure);
+        }
+        section.appendChild(gallery);
+        main.appendChild(section);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'final-actions';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'looks-good';
+      button.textContent = 'Looks good';
+      button.addEventListener('click', approveFinalReview);
+      actions.appendChild(button);
+      main.appendChild(actions);
+      renderMoveControls(main);
+      document.body.appendChild(main);
+    }
+
+    function finalImages() {
+      const images = [];
+      for (const album of current.albums || []) {
+        for (const image of album.images || []) {
+          images.push(image);
+        }
+      }
+      return images;
+    }
+
+    function pruneSelectedPaths() {
+      const visible = new Set(finalImages().map((image) => image.path));
+      selectedPaths = new Set([...selectedPaths].filter((path) => visible.has(path)));
+      if (!selectedPaths.size) {
+        movePanelOpen = false;
+        activeMoveSuggestion = null;
+      }
+    }
+
+    function toggleImageSelection(path, index, shiftKey) {
+      const images = finalImages();
+      if (shiftKey && lastSelectedIndex !== null) {
+        const start = Math.min(lastSelectedIndex, index);
+        const end = Math.max(lastSelectedIndex, index);
+        for (let i = start; i <= end; i += 1) {
+          selectedPaths.add(images[i].path);
+        }
+      } else if (selectedPaths.has(path)) {
+        selectedPaths.delete(path);
+      } else {
+        selectedPaths.add(path);
+      }
+      lastSelectedIndex = index;
+      movePanelOpen = false;
+      activeMoveSuggestion = null;
+      renderFinalReview();
+    }
+
+    function renderMoveControls(root) {
+      if (!selectedPaths.size) return;
+      const controls = document.createElement('div');
+      controls.className = 'move-controls';
+
+      if (!movePanelOpen) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Move to...';
+        button.addEventListener('click', () => {
+          movePanelOpen = true;
+          renderFinalReview();
+        });
+        controls.appendChild(button);
+        root.appendChild(controls);
+        return;
+      }
+
+      const panel = document.createElement('div');
+      panel.className = 'move-panel';
+      const input = document.createElement('input');
+      input.id = 'move-input';
+      input.autocomplete = 'off';
+      input.placeholder = 'Album name';
+      const suggestions = document.createElement('div');
+      suggestions.className = 'suggestions move-suggestions';
+      suggestions.id = 'move-suggestions';
+      suggestions.hidden = true;
+      input.addEventListener('input', () => renderMoveSuggestions(input.value));
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          confirmMoveTo(input.value);
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          movePanelOpen = false;
+          activeMoveSuggestion = null;
+          renderFinalReview();
+        }
+      });
+      panel.appendChild(input);
+      panel.appendChild(suggestions);
+      controls.appendChild(panel);
+      root.appendChild(controls);
+      setTimeout(() => {
+        input.focus();
+        input.select();
+        renderMoveSuggestions(input.value);
+      }, 0);
+    }
+
+    function fuzzyAlbumScore(query, album) {
+      const q = normalize(query);
+      const label = normalize(`${album.country_or_region}/${album.place_name}`);
+      const place = normalize(album.place_name);
+      if (!q) return 10;
+      if (place === q || label === q) return 100;
+      if (place.startsWith(q)) return 80;
+      if (label.startsWith(q)) return 70;
+      if (place.includes(q)) return 50;
+      if (label.includes(q)) return 40;
+      let cursor = 0;
+      for (const char of q) {
+        cursor = label.indexOf(char, cursor);
+        if (cursor === -1) return -1;
+        cursor += 1;
+      }
+      return 20;
+    }
+
+    function renderMoveSuggestions(query) {
+      const root = document.getElementById('move-suggestions');
+      if (!root) return;
+      const ranked = (current.albums || [])
+        .map((album) => ({album, score: fuzzyAlbumScore(query, album)}))
+        .filter((item) => item.score >= 0)
+        .sort((a, b) => b.score - a.score || a.album.place_name.localeCompare(b.album.place_name))
+        .slice(0, 8);
+      if (!ranked.length) {
+        root.hidden = true;
+        activeMoveSuggestion = null;
+        return;
+      }
+      activeMoveSuggestion = ranked[0].album;
+      root.innerHTML = '';
+      ranked.forEach((item, index) => {
+        const div = document.createElement('div');
+        div.className = `suggestion${index === 0 ? ' active' : ''}`;
+        div.innerHTML = `<strong>${item.album.place_name}</strong><span>${item.album.country_or_region}</span>`;
+        div.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          activeMoveSuggestion = item.album;
+          const input = document.getElementById('move-input');
+          input.value = item.album.place_name;
+          root.hidden = true;
+        });
+        root.appendChild(div);
+      });
+      root.hidden = false;
+    }
+
+    async function confirmMoveTo(placeName) {
+      const suggestion = activeMoveSuggestion;
+      const response = await fetch('/api/final/move', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          paths: [...selectedPaths],
+          album_key: suggestion ? suggestion.key : '',
+          place_name: suggestion ? suggestion.place_name : placeName
+        })
+      });
+      current = await response.json();
+      selectedPaths.clear();
+      lastSelectedIndex = null;
+      movePanelOpen = false;
+      activeMoveSuggestion = null;
+      render();
+    }
+
+    function editAlbumName(album, nameNode) {
+      const input = document.createElement('input');
+      input.className = 'album-name-input';
+      input.value = album.place_name || '';
+      let finished = false;
+
+      async function save() {
+        if (finished) return;
+        finished = true;
+        await renameAlbum(album.key, input.value);
+      }
+
+      function cancel() {
+        if (finished) return;
+        finished = true;
+        renderFinalReview();
+      }
+
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          save();
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cancel();
+        }
+      });
+      input.addEventListener('blur', save);
+      nameNode.replaceWith(input);
+      input.focus();
+      input.select();
+    }
+
+    async function renameAlbum(albumKey, placeName) {
+      const response = await fetch('/api/final/album', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({album_key: albumKey, place_name: placeName})
+      });
+      current = await response.json();
+      render();
+    }
+
+    async function approveFinalReview() {
+      const response = await fetch('/api/final/approve', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}'
+      });
+      current = await response.json();
+      render();
+    }
+
     async function submitDecision(place) {
       let country = current.country_or_region || '';
       const typedLocation = splitLocation(place);
@@ -1143,7 +1800,8 @@ HTML = """<!doctype html>
           closeExpandedImage(true);
           return;
         }
-        document.getElementById('suggestions').hidden = true;
+        const suggestions = document.getElementById('suggestions');
+        if (suggestions) suggestions.hidden = true;
         activeSuggestion = null;
         createNewAlbum = false;
       }
@@ -1157,7 +1815,8 @@ HTML = """<!doctype html>
         return;
       }
       if (event.key === 'Enter') {
-        document.getElementById('review-form').requestSubmit();
+        const form = document.getElementById('review-form');
+        if (form) form.requestSubmit();
       }
     });
 
