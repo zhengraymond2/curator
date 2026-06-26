@@ -652,6 +652,8 @@ HTML = """<!doctype html>
       --progress: #16a34a;
       --progress-track: #dceade;
       --success: #15803d;
+      --finder-blue: #0a84ff;
+      --finder-blue-ring: rgba(10, 132, 255, 0.34);
       --panel: #ffffff;
     }
     * { box-sizing: border-box; }
@@ -797,7 +799,7 @@ HTML = """<!doctype html>
     }
     .album-heading {
       display: flex;
-      align-items: baseline;
+      align-items: center;
       gap: 8px;
       margin: 0 0 10px;
     }
@@ -821,9 +823,12 @@ HTML = """<!doctype html>
       font-size: 18px;
       font-weight: 650;
     }
-    .album-heading span {
-      color: var(--muted);
-      font-size: 13px;
+    .album-select-checkbox,
+    .image-select-checkbox {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--finder-blue);
+      flex: 0 0 auto;
     }
     .final-actions {
       position: fixed;
@@ -874,8 +879,8 @@ HTML = """<!doctype html>
       box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.22);
     }
     .gallery figure.selected {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.16);
+      border-color: var(--finder-blue);
+      box-shadow: 0 0 0 3px var(--finder-blue-ring);
     }
     .gallery figure:hover {
       transform: translateY(-1px);
@@ -889,8 +894,9 @@ HTML = """<!doctype html>
       border-color: var(--accent);
     }
     figure.image-tile.selected {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.24);
+      border-color: var(--finder-blue);
+      box-shadow: 0 0 0 4px var(--finder-blue-ring);
+      background: #eef6ff;
     }
     .gallery figure img {
       display: block;
@@ -900,9 +906,16 @@ HTML = """<!doctype html>
       background: #151515;
     }
     .gallery figcaption {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       padding: 6px 8px;
       color: var(--muted);
       font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .image-filename {
+      min-width: 0;
       overflow-wrap: anywhere;
     }
     .gallery-sentinel {
@@ -1398,6 +1411,17 @@ HTML = """<!doctype html>
 
         const heading = document.createElement('div');
         heading.className = 'album-heading';
+        const albumCheckbox = document.createElement('input');
+        albumCheckbox.type = 'checkbox';
+        albumCheckbox.className = 'album-select-checkbox';
+        albumCheckbox.checked = albumImagesSelected(album);
+        albumCheckbox.disabled = !(album.images || []).length;
+        albumCheckbox.title = `Select all in ${album.place_name || 'this album'}`;
+        albumCheckbox.setAttribute('aria-label', `Select all in ${album.place_name || 'this album'}`);
+        albumCheckbox.addEventListener('click', (event) => {
+          event.stopPropagation();
+        });
+        albumCheckbox.addEventListener('change', () => toggleAlbumSelection(album));
         const name = document.createElement('h2');
         name.className = 'album-name';
         name.tabIndex = 0;
@@ -1410,10 +1434,8 @@ HTML = """<!doctype html>
             editAlbumName(album, name);
           }
         });
-        const country = document.createElement('span');
-        country.textContent = album.country_or_region || 'Unsorted';
+        heading.appendChild(albumCheckbox);
         heading.appendChild(name);
-        heading.appendChild(country);
         section.appendChild(heading);
 
         const gallery = document.createElement('div');
@@ -1437,7 +1459,20 @@ HTML = """<!doctype html>
           img.src = image.src;
           img.alt = image.filename;
           const caption = document.createElement('figcaption');
-          caption.textContent = image.filename;
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.className = 'image-select-checkbox';
+          checkbox.checked = selectedPaths.has(image.path);
+          checkbox.setAttribute('aria-label', `Select ${image.filename}`);
+          checkbox.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleImageSelection(image.path, currentIndex, event.shiftKey);
+          });
+          const filename = document.createElement('span');
+          filename.className = 'image-filename';
+          filename.textContent = image.filename;
+          caption.appendChild(checkbox);
+          caption.appendChild(filename);
           figure.appendChild(img);
           figure.appendChild(caption);
           gallery.appendChild(figure);
@@ -1469,6 +1504,11 @@ HTML = """<!doctype html>
       return images;
     }
 
+    function albumImagesSelected(album) {
+      const images = album.images || [];
+      return images.length > 0 && images.every((image) => selectedPaths.has(image.path));
+    }
+
     function pruneSelectedPaths() {
       const visible = new Set(finalImages().map((image) => image.path));
       selectedPaths = new Set([...selectedPaths].filter((path) => visible.has(path)));
@@ -1497,6 +1537,28 @@ HTML = """<!doctype html>
       renderFinalReview();
     }
 
+    function toggleAlbumSelection(album) {
+      const paths = (album.images || []).map((image) => image.path);
+      if (!paths.length) return;
+      if (paths.every((path) => selectedPaths.has(path))) {
+        for (const path of paths) selectedPaths.delete(path);
+      } else {
+        for (const path of paths) selectedPaths.add(path);
+      }
+      lastSelectedIndex = null;
+      movePanelOpen = false;
+      activeMoveSuggestion = null;
+      renderFinalReview();
+    }
+
+    function deselectFinalImages() {
+      selectedPaths.clear();
+      lastSelectedIndex = null;
+      movePanelOpen = false;
+      activeMoveSuggestion = null;
+      renderFinalReview();
+    }
+
     function renderMoveControls(root) {
       if (!selectedPaths.size) return;
       const controls = document.createElement('div');
@@ -1511,6 +1573,7 @@ HTML = """<!doctype html>
           renderFinalReview();
         });
         controls.appendChild(button);
+        controls.appendChild(createDeselectButton());
         root.appendChild(controls);
         return;
       }
@@ -1541,12 +1604,21 @@ HTML = """<!doctype html>
       panel.appendChild(input);
       panel.appendChild(suggestions);
       controls.appendChild(panel);
+      controls.appendChild(createDeselectButton());
       root.appendChild(controls);
       setTimeout(() => {
         input.focus();
         input.select();
         renderMoveSuggestions(input.value);
       }, 0);
+    }
+
+    function createDeselectButton() {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Deselect';
+      button.addEventListener('click', deselectFinalImages);
+      return button;
     }
 
     function fuzzyAlbumScore(query, album) {
