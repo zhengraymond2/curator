@@ -38,6 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 130
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -131,7 +134,7 @@ DEST_MAX_BYTES = 16 * TIB
 INTERNAL_VOLUME_NAMES = {"Macintosh HD", "Macintosh HD - Data", "macOS", "MacOS"}
 GREY = "\033[90m"
 RESET = "\033[0m"
-INTERACTIVE_COMMANDS = ("ingestion",)
+INTERACTIVE_COMMANDS = ("ingestion", "dedupe")
 
 
 @dataclass(frozen=True)
@@ -162,11 +165,28 @@ def cmd_interactive(
 ) -> int:
     input_func = input_func or input
     now_func = now_func or datetime.now
-    suggestions = volume_detector() if volume_detector else detect_volume_suggestions()
 
     print("Curator")
-    prompt_command_menu(input_func=input_func)
+    selected_command = prompt_command_menu(input_func=input_func)
 
+    if selected_command == "ingestion":
+        suggestions = volume_detector() if volume_detector else detect_volume_suggestions()
+        return run_interactive_ingestion(
+            suggestions=suggestions,
+            input_func=input_func,
+            now_func=now_func,
+        )
+    if selected_command == "dedupe":
+        return run_interactive_dedupe(input_func=input_func)
+    raise ValueError(f"unknown interactive command: {selected_command}")
+
+
+def run_interactive_ingestion(
+    *,
+    suggestions: VolumeSuggestions,
+    input_func: Callable[[str], str],
+    now_func: Callable[[], datetime],
+) -> int:
     if suggestions.source_hint and suggestions.destination_hint:
         print("Detected one likely source and one likely destination volume.")
         print("Enter empty to accept detected drives.")
@@ -186,12 +206,79 @@ def cmd_interactive(
     return run_review(source, destination)
 
 
-def prompt_command_menu(*, input_func: Callable[[str], str]) -> str:
-    print("Commands:")
-    for index, command in enumerate(INTERACTIVE_COMMANDS, start=1):
-        print(f"  {index}. {command}")
+def run_interactive_dedupe(*, input_func: Callable[[str], str]) -> int:
+    roots = prompt_dedupe_roots(input_func=input_func)
+    library = prompt_optional_existing_directory(
+        "Library folder (optional)",
+        suggestion=None,
+        input_func=input_func,
+    )
+    trash_suggestion = library / "Trash" if library is not None else None
+    trash = prompt_directory_path(
+        "Trash folder",
+        suggestion=trash_suggestion,
+        input_func=input_func,
+        must_exist=False,
+    )
+    should_apply = prompt_yes_no("Apply dedupe plan now?", default=False, input_func=input_func)
 
-    selected = input_func("Select command [1]: ").strip()
+    progress = cli_progress()
+    plan = build_dedupe_plan(roots, trash, library=library, progress=progress)
+    plan_root = library if library is not None else trash.parent
+    args = argparse.Namespace(
+        apply=should_apply,
+        plan=plan_root / ".curator" / "plans" / f"{plan.run_id}.json",
+    )
+    return handle_generated_plan(
+        plan,
+        args,
+        default_log_root=trash.parent / ".curator" / "logs",
+        progress=progress,
+    )
+
+
+def prompt_command_menu(
+    *,
+    input_func: Callable[[str], str],
+    select_func: Callable[[tuple[str, ...]], str | None] | None = None,
+) -> str:
+    print("Commands:")
+    if select_func is not None:
+        selected = select_func(INTERACTIVE_COMMANDS)
+        return resolve_command_selection(selected)
+
+    if input_func is input and sys.stdin.isatty() and sys.stdout.isatty():
+        selected = select_command_with_questionary(INTERACTIVE_COMMANDS)
+        return resolve_command_selection(selected)
+
+    for command in INTERACTIVE_COMMANDS:
+        print(f"    {command}")
+    selected = input_func(f"Select command [{INTERACTIVE_COMMANDS[0]}]: ").strip()
+    return resolve_command_selection(selected)
+
+
+def select_command_with_questionary(commands: tuple[str, ...]) -> str | None:
+    try:
+        import questionary
+    except ImportError as exc:
+        raise RuntimeError("interactive command selection requires questionary; run `make` to update the environment") from exc
+
+    return questionary.select(
+        "Select command",
+        choices=list(commands),
+        default=commands[0],
+        qmark="",
+        pointer=">",
+        use_arrow_keys=True,
+        use_jk_keys=True,
+        use_emacs_keys=True,
+    ).ask()
+
+
+def resolve_command_selection(selected: str | None) -> str:
+    if selected is None:
+        raise KeyboardInterrupt
+    selected = selected.strip()
     if not selected:
         return INTERACTIVE_COMMANDS[0]
     if selected.isdigit():
@@ -203,7 +290,87 @@ def prompt_command_menu(*, input_func: Callable[[str], str]) -> str:
     for command in INTERACTIVE_COMMANDS:
         if normalized == command.casefold():
             return command
+    matches = [command for command in INTERACTIVE_COMMANDS if command.casefold().startswith(normalized)]
+    if len(matches) == 1:
+        return matches[0]
     raise ValueError(f"unknown interactive command: {selected}")
+
+
+def prompt_dedupe_roots(*, input_func: Callable[[str], str]) -> list[Path]:
+    roots = [prompt_existing_directory("Root folder", suggestion=None, input_func=input_func)]
+    while True:
+        entered = input_path("Additional root folder [Enter to continue]: ", input_func=input_func).strip()
+        if not entered:
+            return roots
+        path = Path(entered).expanduser().resolve()
+        if path.is_dir():
+            roots.append(path)
+            continue
+        print(f"Folder does not exist: {path}")
+
+
+def prompt_optional_existing_directory(
+    label: str,
+    *,
+    suggestion: Path | None,
+    input_func: Callable[[str], str],
+) -> Path | None:
+    while True:
+        entered = input_directory_path(label, suggestion=suggestion, input_func=input_func).strip()
+        if not entered:
+            return None
+        path = Path(entered).expanduser().resolve()
+        if path.is_dir():
+            return path
+        print(f"Folder does not exist: {path}")
+
+
+def prompt_directory_path(
+    label: str,
+    *,
+    suggestion: Path | None,
+    input_func: Callable[[str], str],
+    must_exist: bool,
+) -> Path:
+    while True:
+        entered = input_directory_path(label, suggestion=suggestion, input_func=input_func).strip()
+        if not entered and suggestion is not None:
+            path = suggestion
+        elif entered:
+            path = Path(entered).expanduser()
+        else:
+            print(f"{label} is required.")
+            continue
+
+        path = path.expanduser().resolve()
+        if must_exist and not path.is_dir():
+            print(f"Folder does not exist: {path}")
+            continue
+        if path.exists() and not path.is_dir():
+            print(f"Path is not a folder: {path}")
+            continue
+        return path
+
+
+def input_directory_path(label: str, *, suggestion: Path | None, input_func: Callable[[str], str]) -> str:
+    prompt = f"{label}"
+    if suggestion is not None:
+        prompt += f" {GREY}[{suggestion}]{RESET}"
+    prompt += ": "
+    return input_path(prompt, input_func=input_func)
+
+
+def prompt_yes_no(label: str, *, default: bool, input_func: Callable[[str], str]) -> bool:
+    default_hint = "Y/n" if default else "y/N"
+    while True:
+        entered = input_func(f"{label} [{default_hint}]: ").strip().casefold()
+        if not entered:
+            return default
+        if entered in {"y", "yes"}:
+            return True
+        if entered in {"n", "no"}:
+            return False
+        print("Please enter y or n.")
 
 
 def prompt_existing_directory(

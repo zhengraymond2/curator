@@ -17,6 +17,7 @@ from curator.cli import (
     configure_path_completion,
     main,
     path_completer,
+    prompt_command_menu,
 )
 from curator.metadata import CaptureTimestamp
 from curator.plan import make_plan
@@ -109,7 +110,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(export.is_dir())
         self.assertIn("Commands:", stdout.getvalue())
-        self.assertIn("1. ingestion", stdout.getvalue())
+        self.assertIn("    ingestion", stdout.getvalue())
+        self.assertIn("    dedupe", stdout.getvalue())
+        self.assertNotIn("1. ingestion", stdout.getvalue())
         self.assertIn("Enter empty to accept detected drives.", stdout.getvalue())
         self.assertIn(str(source), prompts[1])
         self.assertIn(str(destination_root), prompts[2])
@@ -117,6 +120,52 @@ class CliTests(unittest.TestCase):
         self.assertEqual(build.call_args.args[:2], (source.resolve(), export.resolve()))
         self.assertEqual(handle.call_args.args[1].plan, export.resolve() / ".curator" / "plans" / "interactive-test.json")
         self.assertEqual(handle.call_args.kwargs["default_log_root"], export.resolve() / ".curator" / "logs")
+
+    def test_interactive_command_menu_uses_selector(self) -> None:
+        seen_commands = None
+
+        def fake_select(commands: tuple[str, ...]) -> str:
+            nonlocal seen_commands
+            seen_commands = commands
+            return "dedupe"
+
+        with redirect_stdout(io.StringIO()) as stdout:
+            selected = prompt_command_menu(input_func=input, select_func=fake_select)
+
+        self.assertEqual(selected, "dedupe")
+        self.assertEqual(seen_commands, ("ingestion", "dedupe"))
+        self.assertIn("Commands:", stdout.getvalue())
+        self.assertNotIn("Select command", stdout.getvalue())
+
+    def test_interactive_command_menu_cancels_when_selector_returns_none(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                prompt_command_menu(input_func=input, select_func=lambda commands: None)
+
+    def test_interactive_dedupe_builds_plan_from_menu_selection(self) -> None:
+        case = unique_case_dir("cli-interactive-dedupe")
+        root = case / "root"
+        trash = case / "Trash"
+        root.mkdir(parents=True)
+        plan = make_plan(run_id="dedupe-test", description="dedupe", operations=[], metadata={"kind": "dedupe"})
+        answers = iter(["dedupe", str(root), "", "", str(trash), ""])
+
+        with patch("curator.cli.build_dedupe_plan", return_value=plan) as build:
+            with patch("curator.cli.handle_generated_plan", return_value=0) as handle:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    exit_code = cmd_interactive(
+                        input_func=lambda prompt: next(answers),
+                        now_func=lambda: datetime(2026, 6, 25, 14, 6),
+                        volume_detector=lambda: VolumeSuggestions(sources=(), destinations=()),
+                    )
+
+        self.assertEqual(exit_code, 0)
+        build.assert_called_once()
+        self.assertEqual(build.call_args.args[:2], ([root.resolve()], trash.resolve()))
+        self.assertIsNone(build.call_args.kwargs["library"])
+        self.assertFalse(handle.call_args.args[1].apply)
+        self.assertEqual(handle.call_args.args[1].plan, case.resolve() / ".curator" / "plans" / "dedupe-test.json")
+        self.assertEqual(handle.call_args.kwargs["default_log_root"], case.resolve() / ".curator" / "logs")
 
     def test_interactive_ingestion_prompts_until_folders_exist(self) -> None:
         case = unique_case_dir("cli-interactive-validate")

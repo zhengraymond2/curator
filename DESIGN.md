@@ -222,13 +222,14 @@ make uninstall-global
 
 ### Interactive `curator`
 
-Running `curator` with no arguments starts an interactive CLI. The first
-supported command is `ingestion`, which maps to the reviewed Source-to-Dest
-copy workflow.
+Running `curator` with no arguments starts an interactive CLI. The command menu
+uses Questionary's selectable prompt and includes `ingestion`, which maps to the
+reviewed Source-to-Dest copy workflow, and `dedupe`, which builds the soft-trash
+duplicate plan interactively.
 
-The interactive flow:
+The interactive ingestion flow:
 
-1. Shows a numbered command menu.
+1. Shows a selectable arrow-key command menu.
 2. Prompts for Source and Destination folders with path autocomplete when the
    terminal supports readline.
 3. Verifies both entered folders exist.
