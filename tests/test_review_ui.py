@@ -151,6 +151,15 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('Looks good', HTML)
         self.assertIn('position: fixed', HTML)
         self.assertIn('Move to...', HTML)
+        self.assertIn('Deselect', HTML)
+        self.assertIn('album-select-checkbox', HTML)
+        self.assertIn('image-select-checkbox', HTML)
+        self.assertIn('albumImagesSelected', HTML)
+        self.assertIn('toggleAlbumSelection', HTML)
+        self.assertIn('deselectFinalImages', HTML)
+        self.assertIn('--finder-blue: #0a84ff', HTML)
+        self.assertIn('var(--finder-blue)', HTML)
+        self.assertNotIn("country.textContent = album.country_or_region", HTML)
 
     def test_review_html_offers_create_new_album_suggestion(self) -> None:
         self.assertIn("Create New Album:", HTML)
