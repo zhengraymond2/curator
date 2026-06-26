@@ -23,6 +23,19 @@ uses this checkout's `.venv` and refreshes it when setup metadata changes.
 
 ## Run
 
+Interactive:
+
+```sh
+curator
+```
+
+Choose `ingestion`, then enter the Source and Destination folders. Curator
+creates `Export YYYY-MM-DD HH:MM` inside the destination folder. If Curator
+detects one likely source drive and one likely destination drive, press Enter at
+each folder prompt to accept them.
+
+Direct:
+
 ```sh
 curator --source /Volumes/mySD --dest /Volumes/myHD
 ```

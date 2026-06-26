@@ -3,9 +3,11 @@ from __future__ import annotations
 import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
-from curator.cli import main
+from curator.cli import GIB, TIB, MountedVolume, VolumeSuggestions, classify_volume_suggestions, cmd_interactive, main
 from curator.metadata import CaptureTimestamp
 from curator.plan import make_plan
 from curator.review_ui import FinalReviewResult
@@ -64,6 +66,80 @@ class CliTests(unittest.TestCase):
             exit_code = main(["--source", str(source), "--dest", str(dest)])
 
         self.assertEqual(exit_code, 1)
+
+    def test_interactive_ingestion_accepts_detected_drives_and_creates_export_folder(self) -> None:
+        case = unique_case_dir("cli-interactive-detected")
+        source = case / "SD"
+        destination_root = case / "HD"
+        source.mkdir(parents=True)
+        destination_root.mkdir()
+        plan = make_plan(run_id="interactive-test", description="interactive", operations=[], metadata={"kind": "organize"})
+        prompts: list[str] = []
+        answers = iter(["", "", ""])
+
+        def fake_input(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        suggestions = VolumeSuggestions(
+            sources=(MountedVolume(source.resolve(), 64 * GIB),),
+            destinations=(MountedVolume(destination_root.resolve(), 2 * TIB),),
+        )
+
+        with patch("curator.cli.build_organize_plan", return_value=plan) as build:
+            with patch("curator.cli.handle_generated_plan", return_value=0) as handle:
+                with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()):
+                    exit_code = cmd_interactive(
+                        input_func=fake_input,
+                        now_func=lambda: datetime(2026, 6, 25, 14, 5),
+                        volume_detector=lambda: suggestions,
+                    )
+
+        export = destination_root / "Export 2026-06-25 14:05"
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(export.is_dir())
+        self.assertIn("Enter empty to accept detected drives.", stdout.getvalue())
+        self.assertIn(str(source), prompts[1])
+        self.assertIn(str(destination_root), prompts[2])
+        build.assert_called_once()
+        self.assertEqual(build.call_args.args[:2], (source.resolve(), export.resolve()))
+        self.assertEqual(handle.call_args.args[1].plan, export.resolve() / ".curator" / "plans" / "interactive-test.json")
+        self.assertEqual(handle.call_args.kwargs["default_log_root"], export.resolve() / ".curator" / "logs")
+
+    def test_interactive_ingestion_prompts_until_folders_exist(self) -> None:
+        case = unique_case_dir("cli-interactive-validate")
+        source = case / "SD"
+        destination_root = case / "HD"
+        source.mkdir(parents=True)
+        destination_root.mkdir()
+        plan = make_plan(run_id="interactive-test", description="interactive", operations=[], metadata={"kind": "organize"})
+        answers = iter(["ingestion", str(case / "missing"), str(source), str(destination_root)])
+
+        with patch("curator.cli.build_organize_plan", return_value=plan):
+            with patch("curator.cli.handle_generated_plan", return_value=0):
+                with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()):
+                    exit_code = cmd_interactive(
+                        input_func=lambda prompt: next(answers),
+                        now_func=lambda: datetime(2026, 6, 25, 14, 6),
+                        volume_detector=lambda: VolumeSuggestions(sources=(), destinations=()),
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Folder does not exist:", stdout.getvalue())
+        self.assertTrue((destination_root / "Export 2026-06-25 14:06").is_dir())
+
+    def test_volume_suggestions_classify_source_and_destination_sizes(self) -> None:
+        source = MountedVolume(Path("/Volumes/SD"), 64 * GIB)
+        small = MountedVolume(Path("/Volumes/Tiny"), 4 * GIB)
+        destination = MountedVolume(Path("/Volumes/HD"), 2 * TIB)
+        huge = MountedVolume(Path("/Volumes/Huge"), 20 * TIB)
+
+        suggestions = classify_volume_suggestions((source, small, destination, huge))
+
+        self.assertEqual(suggestions.sources, (source,))
+        self.assertEqual(suggestions.destinations, (destination,))
+        self.assertEqual(suggestions.source_hint, source.path)
+        self.assertEqual(suggestions.destination_hint, destination.path)
 
     def test_organize_reports_metadata_progress(self) -> None:
         case = unique_case_dir("cli-metadata-progress")

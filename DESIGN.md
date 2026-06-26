@@ -178,6 +178,7 @@ Initial command surface:
 
 ```text
 curator --help
+curator
 curator --source /Volumes/mySD --dest /Volumes/myHD
 curator ingest --help
 curator organize --help
@@ -219,6 +220,28 @@ make clean
 make clean-venv
 make uninstall-global
 ```
+
+### Interactive `curator`
+
+Running `curator` with no arguments starts an interactive CLI. The first
+supported command is `ingestion`, which maps to the reviewed Source-to-Dest
+copy workflow.
+
+The interactive flow:
+
+1. Prompts for a command.
+2. Prompts for Source and Destination folders with path autocomplete when the
+   terminal supports readline.
+3. Verifies both entered folders exist.
+4. Creates `Destination/Export YYYY-MM-DD HH:MM`.
+5. Runs the reviewed browser flow against Source and that export folder.
+
+Curator also scans `/Volumes` for mounted external volumes. It ignores common
+macOS internal volume names and any volume on the same device as `/`. Volumes
+from 8 GiB through 512 GiB are suggested as possible sources. Volumes larger
+than 512 GiB through 16 TiB are suggested as possible destinations. If exactly
+one source and one destination are detected, the folder prompts show those paths
+as grey placeholder defaults and accept an empty entry.
 
 ### `curator ingest`
 

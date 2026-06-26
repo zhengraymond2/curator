@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .dedupe import build_dedupe_plan
 from .dryrun import write_dryrun_file
@@ -23,9 +28,12 @@ from .verification import (
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
     try:
+        if not raw_args:
+            return cmd_interactive()
+        parser = build_parser()
+        args = parser.parse_args(raw_args)
         return args.func(args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
@@ -114,10 +122,192 @@ def add_plan_apply_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--apply", action="store_true", help="apply the generated plan after writing/summarizing it")
 
 
+GIB = 1024**3
+TIB = 1024**4
+SOURCE_MIN_BYTES = 8 * GIB
+SOURCE_MAX_BYTES = 512 * GIB
+DEST_MIN_BYTES = 512 * GIB
+DEST_MAX_BYTES = 16 * TIB
+INTERNAL_VOLUME_NAMES = {"Macintosh HD", "Macintosh HD - Data", "macOS", "MacOS"}
+GREY = "\033[90m"
+RESET = "\033[0m"
+
+
+@dataclass(frozen=True)
+class MountedVolume:
+    path: Path
+    total_bytes: int
+
+
+@dataclass(frozen=True)
+class VolumeSuggestions:
+    sources: tuple[MountedVolume, ...]
+    destinations: tuple[MountedVolume, ...]
+
+    @property
+    def source_hint(self) -> Path | None:
+        return self.sources[0].path if len(self.sources) == 1 and len(self.destinations) == 1 else None
+
+    @property
+    def destination_hint(self) -> Path | None:
+        return self.destinations[0].path if len(self.sources) == 1 and len(self.destinations) == 1 else None
+
+
+def cmd_interactive(
+    *,
+    input_func: Callable[[str], str] | None = None,
+    now_func: Callable[[], datetime] | None = None,
+    volume_detector: Callable[[], VolumeSuggestions] | None = None,
+) -> int:
+    input_func = input_func or input
+    now_func = now_func or datetime.now
+    suggestions = volume_detector() if volume_detector else detect_volume_suggestions()
+
+    print("Curator")
+    print("Available commands: ingestion")
+    command = input_func("Command [ingestion]: ").strip() or "ingestion"
+    if command.casefold() != "ingestion":
+        raise ValueError(f"unknown interactive command: {command}")
+
+    if suggestions.source_hint and suggestions.destination_hint:
+        print("Detected one likely source and one likely destination volume.")
+        print("Enter empty to accept detected drives.")
+
+    source = prompt_existing_directory(
+        "Source folder",
+        suggestion=suggestions.source_hint,
+        input_func=input_func,
+    )
+    destination_root = prompt_existing_directory(
+        "Destination folder",
+        suggestion=suggestions.destination_hint,
+        input_func=input_func,
+    )
+    destination = create_export_destination(destination_root, now_func())
+    print(f"Destination export folder: {destination}")
+    return run_review(source, destination)
+
+
+def prompt_existing_directory(
+    label: str,
+    *,
+    suggestion: Path | None,
+    input_func: Callable[[str], str],
+) -> Path:
+    while True:
+        prompt = f"{label}"
+        if suggestion is not None:
+            prompt += f" {GREY}[{suggestion}]{RESET}"
+        prompt += ": "
+        entered = input_path(prompt, input_func=input_func).strip()
+        if not entered and suggestion is not None:
+            path = suggestion
+        elif entered:
+            path = Path(entered).expanduser()
+        else:
+            print(f"{label} is required.")
+            continue
+
+        path = path.expanduser().resolve()
+        if path.is_dir():
+            return path
+        print(f"Folder does not exist: {path}")
+
+
+def input_path(prompt: str, *, input_func: Callable[[str], str]) -> str:
+    if input_func is not input or not sys.stdin.isatty():
+        return input_func(prompt)
+    try:
+        import readline
+    except ImportError:
+        return input_func(prompt)
+
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+    readline.set_completer(path_completer)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+    try:
+        return input_func(prompt)
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
+
+
+def path_completer(text: str, state: int) -> str | None:
+    expanded = os.path.expanduser(text) if text else ""
+    matches = sorted(glob.glob(expanded + "*"))
+    options = [format_completion(match, original=text) for match in matches]
+    return options[state] if state < len(options) else None
+
+
+def format_completion(match: str, *, original: str) -> str:
+    path = Path(match)
+    completed = str(path)
+    if original.startswith("~"):
+        home = str(Path.home())
+        if completed == home:
+            completed = "~"
+        elif completed.startswith(home + os.sep):
+            completed = "~" + completed[len(home) :]
+    if path.is_dir():
+        completed += os.sep
+    return completed
+
+
+def create_export_destination(destination_root: Path, now: datetime) -> Path:
+    destination = destination_root / f"Export {now.strftime('%Y-%m-%d %H:%M')}"
+    destination.mkdir()
+    return destination.resolve()
+
+
+def detect_volume_suggestions(volumes_root: Path = Path("/Volumes")) -> VolumeSuggestions:
+    volumes = detect_mounted_volumes(volumes_root)
+    return classify_volume_suggestions(volumes)
+
+
+def detect_mounted_volumes(volumes_root: Path = Path("/Volumes")) -> tuple[MountedVolume, ...]:
+    if not volumes_root.is_dir():
+        return ()
+    try:
+        root_device = Path("/").stat().st_dev
+    except OSError:
+        root_device = None
+
+    volumes: list[MountedVolume] = []
+    for path in sorted(volumes_root.iterdir(), key=lambda item: item.name.casefold()):
+        if path.name.startswith(".") or path.name in INTERNAL_VOLUME_NAMES:
+            continue
+        try:
+            if not path.is_dir() or path.is_symlink():
+                continue
+            if root_device is not None and path.stat().st_dev == root_device:
+                continue
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        volumes.append(MountedVolume(path=path.resolve(), total_bytes=usage.total))
+    return tuple(volumes)
+
+
+def classify_volume_suggestions(volumes: tuple[MountedVolume, ...]) -> VolumeSuggestions:
+    sources = tuple(
+        volume for volume in volumes if SOURCE_MIN_BYTES <= volume.total_bytes <= SOURCE_MAX_BYTES
+    )
+    destinations = tuple(
+        volume for volume in volumes if DEST_MIN_BYTES < volume.total_bytes <= DEST_MAX_BYTES
+    )
+    return VolumeSuggestions(sources=sources, destinations=destinations)
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     if args.source is None or args.dest is None:
         raise ValueError("curator requires --source and --dest when no subcommand is used")
-    source, dest = validate_source_dest(args.source, args.dest)
+    return run_review(args.source, args.dest, plan_path=args.plan)
+
+
+def run_review(source: Path, dest: Path, *, plan_path: Path | None = None) -> int:
+    source, dest = validate_source_dest(source, dest)
     progress = cli_progress()
     plan = build_organize_plan(
         source,
@@ -129,8 +319,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         wait_for_final_validation=True,
         progress=progress,
     )
-    args.apply = True
-    args.plan = args.plan or dest / ".curator" / "plans" / f"{plan.run_id}.json"
+    args = argparse.Namespace(apply=True, plan=plan_path or dest / ".curator" / "plans" / f"{plan.run_id}.json")
     return handle_generated_plan(plan, args, default_log_root=dest / ".curator" / "logs", progress=progress)
 
 
