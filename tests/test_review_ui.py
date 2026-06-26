@@ -124,6 +124,33 @@ class ReviewUiTests(unittest.TestCase):
 
         self.assertTrue(approved["done"])
 
+    def test_review_state_can_wait_for_final_cli_validation(self) -> None:
+        state = ReviewState(
+            [ReviewItem(sample_identification(), (sample_image(),), file_count=1)],
+            wait_for_final_validation=True,
+        )
+        state.decide("Costa Rica", "Manuel Antonio")
+
+        approved = state.approve_final_review()
+
+        self.assertTrue(approved["final_validation"])
+        self.assertEqual(approved["validation_status"], "pending")
+        self.assertTrue(state.done.is_set())
+
+        state.complete_final_validation(
+            success=False,
+            title="Validation failed",
+            message="Do not delete the original source folder.",
+            summary="Checksum comparison: FAILED",
+            details="Missing final files:\n  DSC_0001.NEF",
+        )
+        payload = state.payload()
+
+        self.assertEqual(payload["validation_status"], "failed")
+        self.assertIn("Checksum comparison: FAILED", payload["validation_summary"])
+        self.assertIn("Missing final files", payload["validation_details"])
+        self.assertTrue(state.final_validation_seen.is_set())
+
     def test_review_state_accepts_country_and_place_in_single_location_field(self) -> None:
         state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
 
@@ -182,6 +209,9 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('position: fixed', HTML)
         self.assertIn('Move to...', HTML)
         self.assertIn('Deselect', HTML)
+        self.assertIn('renderFinalValidation', HTML)
+        self.assertIn('Waiting for CLI validation', HTML)
+        self.assertIn('Do not delete the original source folder', HTML)
         self.assertIn('album-select-checkbox', HTML)
         self.assertIn('image-select-checkbox', HTML)
         self.assertIn('albumImagesSelected', HTML)

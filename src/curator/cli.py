@@ -13,7 +13,12 @@ from .organize import build_organize_plan
 from .plan import Plan, read_plan, write_plan
 from .progress import ProgressReporter
 from .safety import SafetyError, apply_plan
-from .verification import format_large_red_error, format_verification_summary, verify_organize_copy_plan
+from .verification import (
+    format_large_red_error,
+    format_verification_details,
+    format_verification_summary,
+    verify_organize_copy_plan,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -137,6 +142,7 @@ def cmd_organize(args: argparse.Namespace) -> int:
         identify_places=args.identify_places or args.review_ui,
         review_unknown_places=args.review_unknown_places,
         review_ui=args.review_ui,
+        wait_for_final_validation=args.apply and not args.dry_mode and args.transfer == "copy",
         progress=progress,
     )
     if args.dry_mode:
@@ -171,35 +177,56 @@ def handle_generated_plan(
     notify: bool = False,
     progress: ProgressReporter | None = None,
 ) -> int:
-    if args.plan:
-        write_plan(plan, args.plan)
-        print(f"Wrote plan: {args.plan}")
-    else:
-        print(json.dumps(plan.to_dict(), indent=2, sort_keys=True))
+    validation_reporter = plan.runtime.get("review_validation_reporter")
+    try:
+        if validation_reporter is not None:
+            validation_reporter.start("Curator is writing the plan before copying files.")
 
-    print(plan.summary())
-    if not args.apply:
-        print("Dry run only. Re-run with --apply or use `curator apply PLAN` to mutate files.")
+        if args.plan:
+            write_plan(plan, args.plan)
+            print(f"Wrote plan: {args.plan}")
+        else:
+            print(json.dumps(plan.to_dict(), indent=2, sort_keys=True))
+
+        print(plan.summary())
+        if not args.apply:
+            print("Dry run only. Re-run with --apply or use `curator apply PLAN` to mutate files.")
+            return 0
+
+        if validation_reporter is not None:
+            validation_reporter.start("Curator is copying files, then checking checksums, file totals, and filenames.")
+
+        results = apply_plan(plan, log_root=default_log_root, progress=progress)
+        print(f"Applied {len(results)} operation(s).")
+        if plan.metadata.get("kind") == "organize" and plan.metadata.get("transfer") == "copy":
+            report = verify_organize_copy_plan(plan, progress=progress)
+            summary = format_verification_summary(report)
+            if not report.success:
+                details = format_verification_details(report)
+                if validation_reporter is not None:
+                    validation_reporter.fail(summary, details)
+                print(format_large_red_error(report), file=sys.stderr)
+                return 3
+            print(summary)
+            if validation_reporter is not None:
+                validation_reporter.succeed(summary)
+        if plan.metadata.get("kind") == "ingest":
+            print("Checksum verification: PASSED")
+            print(f"Files copied: {plan.metadata.get('file_count', 0)}")
+            print(f"Bytes copied: {plan.metadata.get('bytes', 0)}")
+            print("Source hashes: complete")
+            print("Destination hashes: complete")
+            print("Mismatches: 0")
+        if notify:
+            play_done_sound()
         return 0
-
-    results = apply_plan(plan, log_root=default_log_root, progress=progress)
-    print(f"Applied {len(results)} operation(s).")
-    if plan.metadata.get("kind") == "organize" and plan.metadata.get("transfer") == "copy":
-        report = verify_organize_copy_plan(plan, progress=progress)
-        if not report.success:
-            print(format_large_red_error(report), file=sys.stderr)
-            return 3
-        print(format_verification_summary(report))
-    if plan.metadata.get("kind") == "ingest":
-        print("Checksum verification: PASSED")
-        print(f"Files copied: {plan.metadata.get('file_count', 0)}")
-        print(f"Bytes copied: {plan.metadata.get('bytes', 0)}")
-        print("Source hashes: complete")
-        print("Destination hashes: complete")
-        print("Mismatches: 0")
-    if notify:
-        play_done_sound()
-    return 0
+    except Exception as exc:
+        if validation_reporter is not None:
+            validation_reporter.fail(
+                "Curator stopped before final validation passed.",
+                f"{type(exc).__name__}: {exc}",
+            )
+        raise
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
