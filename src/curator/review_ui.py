@@ -332,6 +332,8 @@ HTML = """<!doctype html>
       --line: #d7d4cc;
       --accent: #0f766e;
       --accent-ink: #ffffff;
+      --progress: #16a34a;
+      --progress-track: #dceade;
       --panel: #ffffff;
     }
     * { box-sizing: border-box; }
@@ -366,9 +368,29 @@ HTML = """<!doctype html>
       font-weight: 650;
     }
     #progress {
+      display: grid;
+      grid-template-columns: auto minmax(120px, 220px);
+      align-items: center;
+      gap: 10px;
       color: var(--muted);
       font-size: 14px;
       white-space: nowrap;
+    }
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      overflow: hidden;
+      border: 1px solid #c8dccd;
+      border-radius: 999px;
+      background: var(--progress-track);
+    }
+    .progress-fill {
+      display: block;
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--progress);
+      transition: width 240ms ease;
     }
     form {
       display: grid;
@@ -440,25 +462,98 @@ HTML = """<!doctype html>
       gap: 8px;
       align-content: start;
     }
-    figure {
+    .gallery figure {
       margin: 0;
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
+      cursor: pointer;
+      transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
     }
-    figure img {
+    .gallery figure:focus {
+      outline: none;
+    }
+    .gallery figure:focus-visible {
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.22);
+    }
+    .gallery figure.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.16);
+    }
+    .gallery figure:hover {
+      transform: translateY(-1px);
+    }
+    .gallery figure img {
       display: block;
       width: 100%;
       aspect-ratio: 4 / 3;
       object-fit: contain;
       background: #151515;
     }
-    figcaption {
+    .gallery figcaption {
       padding: 6px 8px;
       color: var(--muted);
       font-size: 12px;
       overflow-wrap: anywhere;
+    }
+    .gallery-sentinel {
+      grid-column: 1 / -1;
+      height: 1px;
+    }
+    .expanded-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      background: rgba(15, 23, 42, 0.72);
+      opacity: 0;
+      transition: opacity 220ms ease;
+    }
+    .expanded-backdrop.visible {
+      opacity: 1;
+    }
+    .expanded-figure {
+      position: fixed;
+      z-index: 21;
+      margin: 0;
+      overflow: visible;
+      border-radius: 8px;
+      transition:
+        left 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        top 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        width 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        height 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        opacity 180ms ease;
+    }
+    .expanded-figure img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      border-radius: 8px;
+      background: #111111;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.38);
+    }
+    .expanded-figure figcaption {
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 0;
+      right: 0;
+      padding: 0;
+      color: #ffffff;
+      font-size: 13px;
+      text-align: center;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.42);
+      opacity: 0;
+      transition: opacity 160ms ease;
+      overflow-wrap: anywhere;
+    }
+    .expanded-figure.visible figcaption {
+      opacity: 1;
+      transition-delay: 120ms;
+    }
+    body.expanded-open {
+      overflow: hidden;
     }
     aside {
       background: var(--panel);
@@ -493,7 +588,10 @@ HTML = """<!doctype html>
     @media (max-width: 820px) {
       form { grid-template-columns: 1fr; }
       main { grid-template-columns: 1fr; }
-      #progress { white-space: normal; }
+      #progress {
+        grid-template-columns: auto minmax(90px, 1fr);
+        white-space: normal;
+      }
     }
   </style>
 </head>
@@ -501,7 +599,10 @@ HTML = """<!doctype html>
   <header>
     <div class="topline">
       <h1>Curator Review</h1>
-      <div id="progress"></div>
+      <div id="progress" aria-label="Album naming progress">
+        <span id="progress-count">0/0</span>
+        <span class="progress-track" aria-hidden="true"><span class="progress-fill" id="progress-fill"></span></span>
+      </div>
     </div>
     <form id="review-form">
       <div class="place-wrap">
@@ -526,8 +627,14 @@ HTML = """<!doctype html>
     </aside>
   </main>
   <script>
+    const GALLERY_PAGE_SIZE = 36;
+
     let current = null;
     let activeSuggestion = null;
+    let galleryObserver = null;
+    let galleryRenderedCount = 0;
+    let selectedImageIndex = -1;
+    let expandedView = null;
 
     async function loadState() {
       const response = await fetch('/api/state');
@@ -547,17 +654,15 @@ HTML = """<!doctype html>
 
     function render() {
       if (!current || current.done) {
+        closeExpandedImage(false);
+        resetGalleryObserver();
         document.body.innerHTML = '<div class="done"><h1>All groups reviewed</h1><p>You can return to the terminal.</p></div>';
         return;
       }
       if (current.loading) {
-        let content;
-        if (current.index == current.total) {
-          content = "Finished";
-        } else {
-          content = `Preparing group ${current.index + 1} / ${current.total}`;
-        }
-        document.getElementById('progress').textContent = content;
+        closeExpandedImage(false);
+        resetGalleryObserver();
+        updateProgress();
         const gallery = document.getElementById('gallery');
         if (gallery) gallery.innerHTML = '<div class="loading">Preparing the next album suggestion...</div>';
         for (const id of ['group', 'file-count', 'confidence', 'rationale', 'context']) {
@@ -569,7 +674,8 @@ HTML = """<!doctype html>
         setTimeout(loadState, 900);
         return;
       }
-      document.getElementById('progress').textContent = `Group ${current.index + 1} / ${current.total}`;
+      closeExpandedImage(false);
+      updateProgress();
       document.getElementById('place').value = current.place_name || '';
       document.getElementById('group').textContent = current.group_id;
       document.getElementById('file-count').textContent = current.file_count;
@@ -579,22 +685,223 @@ HTML = """<!doctype html>
       renderList('evidence', current.visual_evidence);
       renderList('alternates', current.alternate_guesses);
 
-      const gallery = document.getElementById('gallery');
-      gallery.innerHTML = '';
-      for (const image of current.images || []) {
-        const figure = document.createElement('figure');
-        const img = document.createElement('img');
-        img.src = image.src;
-        img.alt = image.filename;
-        const caption = document.createElement('figcaption');
-        caption.textContent = image.filename;
-        figure.appendChild(img);
-        figure.appendChild(caption);
-        gallery.appendChild(figure);
-      }
+      renderGallery();
       document.getElementById('place').focus();
       document.getElementById('place').select();
       renderSuggestions();
+    }
+
+    function progressState() {
+      if (!current) return {current: 0, total: 0};
+      const total = Number(current.total || 0);
+      const currentNumber = current.done ? total : Math.min(total, Number(current.index || 0) + 1);
+      return {current: currentNumber, total};
+    }
+
+    function updateProgress() {
+      const progress = progressState();
+      const count = document.getElementById('progress-count');
+      const fill = document.getElementById('progress-fill');
+      if (!count || !fill) return;
+      count.textContent = `${progress.current}/${progress.total}`;
+      const percent = progress.total ? Math.max(0, Math.min(100, (progress.current / progress.total) * 100)) : 0;
+      fill.style.width = `${percent}%`;
+    }
+
+    function resetGalleryObserver() {
+      if (galleryObserver) {
+        galleryObserver.disconnect();
+        galleryObserver = null;
+      }
+    }
+
+    function renderGallery() {
+      resetGalleryObserver();
+      const gallery = document.getElementById('gallery');
+      gallery.innerHTML = '';
+      galleryRenderedCount = 0;
+      selectedImageIndex = -1;
+      appendGalleryPage();
+    }
+
+    function appendGalleryPage() {
+      resetGalleryObserver();
+      const gallery = document.getElementById('gallery');
+      if (!gallery || !current) return;
+      const previousSentinel = gallery.querySelector('.gallery-sentinel');
+      if (previousSentinel) previousSentinel.remove();
+
+      const images = current.images || [];
+      const start = galleryRenderedCount;
+      const end = Math.min(start + GALLERY_PAGE_SIZE, images.length);
+      for (let index = start; index < end; index += 1) {
+        gallery.appendChild(createImageFigure(images[index], index));
+      }
+      galleryRenderedCount = end;
+
+      if (galleryRenderedCount < images.length) {
+        const sentinel = document.createElement('div');
+        sentinel.className = 'gallery-sentinel';
+        gallery.appendChild(sentinel);
+        galleryObserver = new IntersectionObserver((entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) appendGalleryPage();
+        });
+        galleryObserver.observe(sentinel);
+      }
+    }
+
+    function createImageFigure(image, index) {
+      const figure = document.createElement('figure');
+      figure.tabIndex = 0;
+      figure.dataset.index = String(index);
+      figure.setAttribute('role', 'button');
+      figure.setAttribute('aria-label', `Open ${image.filename}`);
+
+      const img = document.createElement('img');
+      img.src = image.src;
+      img.alt = image.filename;
+      const caption = document.createElement('figcaption');
+      caption.textContent = image.filename;
+
+      figure.appendChild(img);
+      figure.appendChild(caption);
+      figure.addEventListener('click', () => {
+        selectImage(index, figure);
+        figure.focus({preventScroll: true});
+      });
+      figure.addEventListener('dblclick', () => openExpandedImage(image, figure));
+      figure.addEventListener('keydown', (event) => {
+        if (isSpaceKey(event)) {
+          event.preventDefault();
+          selectImage(index, figure);
+          openExpandedImage(image, figure);
+        }
+      });
+      return figure;
+    }
+
+    function selectImage(index, figure) {
+      selectedImageIndex = index;
+      document.querySelectorAll('.gallery figure.selected').forEach((node) => node.classList.remove('selected'));
+      figure.classList.add('selected');
+    }
+
+    function openSelectedImage() {
+      if (!current || selectedImageIndex < 0) return;
+      const image = (current.images || [])[selectedImageIndex];
+      const figure = document.querySelector(`.gallery figure[data-index="${selectedImageIndex}"]`);
+      if (image && figure) openExpandedImage(image, figure);
+    }
+
+    function openExpandedImage(image, figure) {
+      closeExpandedImage(false);
+      selectImage(Number(figure.dataset.index), figure);
+
+      const originImage = figure.querySelector('img');
+      const origin = originImage.getBoundingClientRect();
+      const target = expandedTargetRect(image);
+      const backdrop = document.createElement('div');
+      backdrop.className = 'expanded-backdrop';
+      backdrop.addEventListener('click', () => closeExpandedImage(true));
+
+      const expandedFigure = document.createElement('figure');
+      expandedFigure.className = 'expanded-figure';
+      expandedFigure.style.left = `${origin.left}px`;
+      expandedFigure.style.top = `${origin.top}px`;
+      expandedFigure.style.width = `${origin.width}px`;
+      expandedFigure.style.height = `${origin.height}px`;
+
+      const expandedImage = document.createElement('img');
+      expandedImage.src = image.src;
+      expandedImage.alt = image.filename;
+      const caption = document.createElement('figcaption');
+      caption.textContent = image.filename;
+
+      expandedFigure.appendChild(expandedImage);
+      expandedFigure.appendChild(caption);
+      document.body.appendChild(backdrop);
+      document.body.appendChild(expandedFigure);
+      document.body.classList.add('expanded-open');
+      expandedView = {backdrop, figure: expandedFigure, originFigure: figure};
+
+      requestAnimationFrame(() => {
+        backdrop.classList.add('visible');
+        expandedFigure.classList.add('visible');
+        expandedFigure.style.left = `${target.left}px`;
+        expandedFigure.style.top = `${target.top}px`;
+        expandedFigure.style.width = `${target.width}px`;
+        expandedFigure.style.height = `${target.height}px`;
+      });
+    }
+
+    function closeExpandedImage(animate = true) {
+      if (!expandedView) return;
+      const view = expandedView;
+      expandedView = null;
+
+      const cleanup = () => {
+        view.backdrop.remove();
+        view.figure.remove();
+        document.body.classList.remove('expanded-open');
+      };
+
+      if (!animate) {
+        cleanup();
+        return;
+      }
+
+      const originImage = view.originFigure && view.originFigure.querySelector('img');
+      const origin = originImage ? originImage.getBoundingClientRect() : {
+        left: window.innerWidth / 2,
+        top: window.innerHeight / 2,
+        width: 1,
+        height: 1,
+      };
+      view.backdrop.classList.remove('visible');
+      view.figure.classList.remove('visible');
+      view.figure.style.left = `${origin.left}px`;
+      view.figure.style.top = `${origin.top}px`;
+      view.figure.style.width = `${origin.width}px`;
+      view.figure.style.height = `${origin.height}px`;
+
+      let cleaned = false;
+      const finish = () => {
+        if (cleaned) return;
+        cleaned = true;
+        cleanup();
+      };
+      view.figure.addEventListener('transitionend', finish, {once: true});
+      setTimeout(finish, 320);
+    }
+
+    function expandedTargetRect(image) {
+      const margin = Math.max(18, Math.min(48, window.innerWidth * 0.04));
+      const maxWidth = window.innerWidth - margin * 2;
+      const maxHeight = window.innerHeight - margin * 2 - 34;
+      const preparedSize = Array.isArray(image.prepared_size) ? image.prepared_size : null;
+      const naturalWidth = Number(preparedSize && preparedSize[0]) || 4;
+      const naturalHeight = Number(preparedSize && preparedSize[1]) || 3;
+      const ratio = naturalWidth / naturalHeight;
+      let width = maxWidth;
+      let height = width / ratio;
+      if (height > maxHeight) {
+        height = maxHeight;
+        width = height * ratio;
+      }
+      return {
+        left: (window.innerWidth - width) / 2,
+        top: (window.innerHeight - height) / 2,
+        width,
+        height,
+      };
+    }
+
+    function isSpaceKey(event) {
+      return event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space';
+    }
+
+    function isTextInputTarget(target) {
+      return target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
     }
 
     async function submitDecision(place) {
@@ -700,8 +1007,22 @@ HTML = """<!doctype html>
 
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
+        if (expandedView) {
+          event.preventDefault();
+          closeExpandedImage(true);
+          return;
+        }
         document.getElementById('suggestions').hidden = true;
         activeSuggestion = null;
+      }
+      if (isSpaceKey(event) && !isTextInputTarget(event.target) && selectedImageIndex >= 0 && !expandedView) {
+        event.preventDefault();
+        openSelectedImage();
+        return;
+      }
+      if (event.key === 'Enter' && expandedView) {
+        event.preventDefault();
+        return;
       }
       if (event.key === 'Enter') {
         document.getElementById('review-form').requestSubmit();
