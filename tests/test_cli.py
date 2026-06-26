@@ -8,11 +8,63 @@ from unittest.mock import patch
 
 from curator.cli import main
 from curator.metadata import CaptureTimestamp
+from curator.plan import make_plan
 
 from tests.helpers import unique_case_dir
 
 
 class CliTests(unittest.TestCase):
+    def test_top_level_source_dest_runs_reviewed_copy_flow(self) -> None:
+        case = unique_case_dir("cli-top-level")
+        source = case / "card"
+        dest = case / "drive"
+        source.mkdir(parents=True)
+        dest.mkdir()
+        plan = make_plan(run_id="review-test", description="review", operations=[], metadata={"kind": "organize"})
+
+        with patch("curator.cli.build_organize_plan", return_value=plan) as build:
+            with patch("curator.cli.handle_generated_plan", return_value=0) as handle:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    exit_code = main(["--source", str(source), "--dest", str(dest)])
+
+        self.assertEqual(exit_code, 0)
+        build.assert_called_once()
+        self.assertEqual(build.call_args.args[:2], (source.resolve(), dest.resolve()))
+        self.assertEqual(build.call_args.kwargs["mode"], "migration")
+        self.assertEqual(build.call_args.kwargs["transfer"], "copy")
+        self.assertTrue(build.call_args.kwargs["review_ui"])
+        self.assertTrue(build.call_args.kwargs["wait_for_final_validation"])
+        self.assertEqual(handle.call_args.args[0], plan)
+        self.assertEqual(handle.call_args.kwargs["default_log_root"], dest.resolve() / ".curator" / "logs")
+        self.assertEqual(handle.call_args.args[1].plan, dest.resolve() / ".curator" / "plans" / "review-test.json")
+        self.assertTrue(handle.call_args.args[1].apply)
+
+    def test_top_level_accepts_source_typo_from_documented_command(self) -> None:
+        case = unique_case_dir("cli-top-level-triple-source")
+        source = case / "card"
+        dest = case / "drive"
+        source.mkdir(parents=True)
+        dest.mkdir()
+        plan = make_plan(run_id="review-test", description="review", operations=[], metadata={"kind": "organize"})
+
+        with patch("curator.cli.build_organize_plan", return_value=plan):
+            with patch("curator.cli.handle_generated_plan", return_value=0):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    exit_code = main(["---source", str(source), "--dest", str(dest)])
+
+        self.assertEqual(exit_code, 0)
+
+    def test_top_level_validates_source_and_dest(self) -> None:
+        case = unique_case_dir("cli-top-level-validation")
+        source = case / "card"
+        dest = case / "drive"
+        dest.mkdir(parents=True)
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            exit_code = main(["--source", str(source), "--dest", str(dest)])
+
+        self.assertEqual(exit_code, 1)
+
     def test_organize_dry_mode_writes_dryrun_txt_without_applying(self) -> None:
         case = unique_case_dir("cli-dry-mode")
         source = case / "originalFolder" / "DCIM"

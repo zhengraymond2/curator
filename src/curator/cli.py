@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,7 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="curator",
         description="Plan-first photo and video file-management CLI.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--source", "---source", type=Path, help="source card or folder to organize")
+    parser.add_argument("--dest", type=Path, help="destination volume or library root")
+    parser.add_argument("--plan", type=Path, help="write the generated plan to this path")
+    parser.set_defaults(func=cmd_review)
+
+    subparsers = parser.add_subparsers(dest="command")
 
     ingest = subparsers.add_parser("ingest", help="copy a card/source folder with checksum verification")
     ingest.add_argument("--source", required=True, type=Path)
@@ -116,6 +122,54 @@ def build_parser() -> argparse.ArgumentParser:
 def add_plan_apply_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plan", type=Path, help="write the generated plan to this path")
     parser.add_argument("--apply", action="store_true", help="apply the generated plan after writing/summarizing it")
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    if args.source is None or args.dest is None:
+        raise ValueError("curator requires --source and --dest when no subcommand is used")
+    source, dest = validate_source_dest(args.source, args.dest)
+    progress = cli_progress()
+    plan = build_organize_plan(
+        source,
+        dest,
+        mode="migration",
+        transfer="copy",
+        identify_places=True,
+        review_ui=True,
+        wait_for_final_validation=True,
+        progress=progress,
+    )
+    args.apply = True
+    args.plan = args.plan or dest / ".curator" / "plans" / f"{plan.run_id}.json"
+    return handle_generated_plan(plan, args, default_log_root=dest / ".curator" / "logs", progress=progress)
+
+
+def validate_source_dest(source: Path, dest: Path) -> tuple[Path, Path]:
+    source = source.expanduser().resolve()
+    dest = dest.expanduser().resolve()
+    if not source.is_dir():
+        raise ValueError(f"source must be an existing directory: {source}")
+    if not dest.is_dir():
+        raise ValueError(f"dest must be an existing directory: {dest}")
+    if source == dest:
+        raise ValueError("source and dest must be different directories")
+    if is_relative_path(source, dest):
+        raise ValueError("source cannot be inside dest")
+    if is_relative_path(dest, source):
+        raise ValueError("dest cannot be inside source")
+    if not os.access(source, os.R_OK | os.X_OK):
+        raise ValueError(f"source must be readable: {source}")
+    if not os.access(dest, os.W_OK | os.X_OK):
+        raise ValueError(f"dest must be writable: {dest}")
+    return source, dest
+
+
+def is_relative_path(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
