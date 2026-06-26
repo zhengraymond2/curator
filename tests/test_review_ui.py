@@ -103,6 +103,25 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn("Create New Album:", HTML)
         self.assertIn("createNewAlbum", HTML)
 
+    def test_review_html_paginates_gallery_images(self) -> None:
+        self.assertIn("const GALLERY_PAGE_SIZE", HTML)
+        self.assertIn("IntersectionObserver", HTML)
+        self.assertIn("appendGalleryPage", HTML)
+        self.assertIn("galleryRenderedCount < images.length", HTML)
+
+    def test_review_html_expands_selected_images_with_escape_close(self) -> None:
+        self.assertIn("openExpandedImage", HTML)
+        self.assertIn("closeExpandedImage(true)", HTML)
+        self.assertIn("expandedTargetRect", HTML)
+        self.assertIn("isSpaceKey(event)", HTML)
+        self.assertIn("event.key === 'Escape'", HTML)
+
+    def test_review_html_has_album_progress_bar(self) -> None:
+        self.assertIn('id="progress-count"', HTML)
+        self.assertIn('id="progress-fill"', HTML)
+        self.assertIn("${progress.current}/${progress.total}", HTML)
+        self.assertIn("fill.style.width", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
