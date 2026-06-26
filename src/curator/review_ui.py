@@ -37,6 +37,7 @@ class ReviewItem:
 
 
 ImageUrlBuilder = Callable[[str, int, int], str]
+CountryGuessStarter = Callable[[str, str, tuple[PreparedImage, ...]], None]
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,13 @@ class FinalValidationProgress:
 
 
 class ReviewState:
-    def __init__(self, items: Sequence[ReviewItem], *, wait_for_final_validation: bool = False) -> None:
+    def __init__(
+        self,
+        items: Sequence[ReviewItem],
+        *,
+        wait_for_final_validation: bool = False,
+        country_guess_starter: CountryGuessStarter | None = None,
+    ) -> None:
         self.items = list(items)
         self.items_by_group_id = {item.identification.group_id: item for item in self.items}
         self.index = 0
@@ -69,6 +76,7 @@ class ReviewState:
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
         self.image_data: dict[str, tuple[PreparedImage, ...]] = {}
+        self.model_image_data: dict[str, tuple[PreparedImage, ...]] = {}
         self.image_errors: dict[str, str] = {}
         self.image_loading: set[str] = {
             item.identification.group_id for item in self.items if item.images_pending
@@ -77,6 +85,9 @@ class ReviewState:
         self.accepted_suggestions: list[LocationSuggestion] = []
         self.reviewed: list[ReviewedAlbum] = []
         self.image_locations: dict[str, PlaceIdentification] = {}
+        self.country_guess_starter = country_guess_starter
+        self.country_guess_loading: set[str] = set()
+        self.country_locked: set[str] = set()
         self.final_ready = False
         self.final_validation_status: str | None = None
         self.final_validation_title = ""
@@ -116,6 +127,7 @@ class ReviewState:
                     image_url_builder=image_url_builder,
                     image_versions=self.image_versions,
                     images_loading=self.image_loading,
+                    country_guesses_loading=self.country_guess_loading,
                 )
             if self.index >= len(self.items):
                 return {"done": True, "index": self.index, "total": len(self.items)}
@@ -139,6 +151,7 @@ class ReviewState:
         place_name: str | None,
         image_url_builder: ImageUrlBuilder | None = None,
     ) -> Mapping[str, object]:
+        country_guess_request: tuple[str, str, tuple[PreparedImage, ...]] | None = None
         with self.lock:
             if self.index >= len(self.items):
                 self.done.set()
@@ -146,6 +159,7 @@ class ReviewState:
 
             item = self.item_with_current_context(self.items[self.index])
             original = self.llm_data.get(item.identification.group_id, item.identification)
+            country_was_explicit = country_supplied_by_user(country_or_region, place_name)
             suggestions = [*item.suggestions, *self.accepted_suggestions]
             country, place = resolve_location(
                 country_or_region,
@@ -162,13 +176,23 @@ class ReviewState:
                 rationale=f"User reviewed location: {country}/{place}",
             )
             self.decisions[original.group_id] = reviewed
+            if country_was_explicit:
+                self.country_locked.add(original.group_id)
+            elif self.country_guess_starter and place:
+                self.country_locked.discard(original.group_id)
+                self.country_guess_loading.add(original.group_id)
+                country_guess_request = (
+                    original.group_id,
+                    place,
+                    self.model_images_for_group(original.group_id, item),
+                )
             self.reviewed.append(ReviewedAlbum(item=item, decision=reviewed))
             set_initial_image_locations(self.image_locations, item, reviewed)
             add_location_suggestion(self.accepted_suggestions, reviewed)
             self.index += 1
             if self.index >= len(self.items):
                 self.final_ready = True
-                return final_review_payload(
+                payload = final_review_payload(
                     self.reviewed,
                     self.image_locations,
                     self.index,
@@ -176,20 +200,25 @@ class ReviewState:
                     image_url_builder=image_url_builder,
                     image_versions=self.image_versions,
                     images_loading=self.image_loading,
+                    country_guesses_loading=self.country_guess_loading,
                 )
-            item = self.item_with_current_context(self.items[self.index])
-            return review_item_payload(
-                item,
-                self.index,
-                len(self.items),
-                llm_data=self.llm_data,
-                llm_errors=self.llm_errors,
-                image_data=self.image_data,
-                image_errors=self.image_errors,
-                image_loading=self.image_loading,
-                image_versions=self.image_versions,
-                image_url_builder=image_url_builder,
-            )
+            else:
+                item = self.item_with_current_context(self.items[self.index])
+                payload = review_item_payload(
+                    item,
+                    self.index,
+                    len(self.items),
+                    llm_data=self.llm_data,
+                    llm_errors=self.llm_errors,
+                    image_data=self.image_data,
+                    image_errors=self.image_errors,
+                    image_loading=self.image_loading,
+                    image_versions=self.image_versions,
+                    image_url_builder=image_url_builder,
+                )
+        if country_guess_request:
+            self.country_guess_starter(*country_guess_request)
+        return payload
 
     def store_llm_result(self, identification: PlaceIdentification) -> None:
         with self.lock:
@@ -218,11 +247,48 @@ class ReviewState:
             self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
             self.refresh_reviewed_images(group_id, prepared)
 
+    def store_model_images(self, group_id: str, images: Sequence[PreparedImage]) -> None:
+        with self.lock:
+            self.model_image_data[group_id] = tuple(images)
+
     def store_image_error(self, group_id: str, error: Exception) -> None:
         with self.lock:
             self.image_errors[group_id] = str(error)
             self.image_loading.discard(group_id)
             self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
+
+    def store_country_guess(self, group_id: str, album_name: str, identification: PlaceIdentification) -> None:
+        with self.lock:
+            self.country_guess_loading.discard(group_id)
+            if group_id in self.country_locked:
+                return
+            for index, reviewed_album in enumerate(self.reviewed):
+                decision = reviewed_album.decision
+                if decision.group_id != group_id or normalize_text(decision.place_name) != normalize_text(album_name):
+                    continue
+                updated = updated_final_decision(
+                    decision,
+                    identification.country_or_region,
+                    decision.place_name,
+                    rationale_prefix="LLM guessed country after album naming",
+                    confidence=identification.confidence,
+                )
+                self.reviewed[index] = ReviewedAlbum(item=reviewed_album.item, decision=updated)
+                for path, image_decision in list(self.image_locations.items()):
+                    if image_decision.group_id == group_id and normalize_text(image_decision.place_name) == normalize_text(album_name):
+                        self.image_locations[path] = updated_final_decision(
+                            image_decision,
+                            identification.country_or_region,
+                            image_decision.place_name,
+                            rationale_prefix="LLM guessed country after album naming",
+                            confidence=identification.confidence,
+                        )
+                self.decisions = reviewed_decisions(self.reviewed)
+                return
+
+    def store_country_guess_error(self, group_id: str, error: Exception) -> None:
+        with self.lock:
+            self.country_guess_loading.discard(group_id)
 
     def image_url(self, group_id: str, index: int, version: int) -> str:
         return f"/api/image?{urlencode({'group_id': group_id, 'index': index, 'v': version})}"
@@ -239,6 +305,9 @@ class ReviewState:
             return self.image_data[group_id]
         item = self.items_by_group_id.get(group_id)
         return item.prepared_images if item else ()
+
+    def model_images_for_group(self, group_id: str, item: ReviewItem) -> tuple[PreparedImage, ...]:
+        return self.model_image_data.get(group_id) or item.prepared_images
 
     def item_with_current_context(self, item: ReviewItem) -> ReviewItem:
         group_id = item.identification.group_id
@@ -396,12 +465,16 @@ class ReviewState:
     def rename_album(
         self,
         target_key: str,
-        folder_name: str,
+        country_or_region: str,
+        folder_name: str | None = None,
         image_url_builder: ImageUrlBuilder | None = None,
     ) -> Mapping[str, object]:
+        if folder_name is None:
+            country_or_region, folder_name = "", country_or_region
         with self.lock:
-            rename_reviewed_album(self.reviewed, self.image_locations, target_key, folder_name)
+            rename_reviewed_album(self.reviewed, self.image_locations, target_key, country_or_region, folder_name)
             self.decisions = reviewed_decisions(self.reviewed)
+            lock_country_for_album(self.country_locked, self.reviewed, country_or_region, folder_name)
             return final_review_payload(
                 self.reviewed,
                 self.image_locations,
@@ -410,6 +483,7 @@ class ReviewState:
                 image_url_builder=image_url_builder,
                 image_versions=self.image_versions,
                 images_loading=self.image_loading,
+                country_guesses_loading=self.country_guess_loading,
             )
 
     def move_images(
@@ -429,6 +503,7 @@ class ReviewState:
                 image_url_builder=image_url_builder,
                 image_versions=self.image_versions,
                 images_loading=self.image_loading,
+                country_guesses_loading=self.country_guess_loading,
             )
 
 
@@ -764,11 +839,14 @@ class SequentialReviewState:
     def rename_album(
         self,
         target_key: str,
-        folder_name: str,
+        country_or_region: str,
+        folder_name: str | None = None,
         image_url_builder: ImageUrlBuilder | None = None,
     ) -> Mapping[str, object]:
+        if folder_name is None:
+            country_or_region, folder_name = "", country_or_region
         with self.lock:
-            rename_reviewed_album(self.reviewed, self.image_locations, target_key, folder_name)
+            rename_reviewed_album(self.reviewed, self.image_locations, target_key, country_or_region, folder_name)
             return final_review_payload(
                 self.reviewed,
                 self.image_locations,
@@ -888,6 +966,7 @@ def final_review_payload(
     image_url_builder: ImageUrlBuilder | None = None,
     image_versions: Mapping[str, int] | None = None,
     images_loading: set[str] | None = None,
+    country_guesses_loading: set[str] | None = None,
 ) -> Mapping[str, object]:
     albums: dict[tuple[str, str], dict[str, object]] = {}
     image_versions = image_versions or {}
@@ -928,6 +1007,7 @@ def final_review_payload(
         "index": index,
         "total": total,
         "images_loading": bool(images_loading),
+        "country_guesses_loading": bool(country_guesses_loading),
         "albums": list(albums.values()),
     }
 
@@ -965,6 +1045,20 @@ def reviewed_decisions(reviewed: Sequence[ReviewedAlbum]) -> dict[str, PlaceIden
     return {album.decision.group_id: album.decision for album in reviewed}
 
 
+def lock_country_for_album(
+    country_locked: set[str],
+    reviewed: Sequence[ReviewedAlbum],
+    country_or_region: str,
+    folder_name: str,
+) -> None:
+    if not country_or_region.strip():
+        return
+    target = (normalize_text(country_or_region), normalize_text(folder_name))
+    for album in reviewed:
+        if (normalize_text(album.decision.country_or_region), normalize_text(album.decision.place_name)) == target:
+            country_locked.add(album.decision.group_id)
+
+
 def set_initial_image_locations(
     image_locations: dict[str, PlaceIdentification],
     item: ReviewItem,
@@ -978,19 +1072,20 @@ def rename_reviewed_album(
     reviewed: list[ReviewedAlbum],
     image_locations: dict[str, PlaceIdentification],
     target_key: str,
+    country_or_region: str,
     folder_name: str,
 ) -> None:
     for index, reviewed_album in enumerate(reviewed):
         decision = reviewed_album.decision
         if album_key(decision.country_or_region, decision.place_name) != target_key:
             continue
-        country, place = resolve_album_name(folder_name, decision)
+        country, place = resolve_album_location(country_or_region, folder_name, decision)
         updated = updated_final_decision(decision, country, place)
         reviewed[index] = ReviewedAlbum(item=reviewed_album.item, decision=updated)
     for path, decision in list(image_locations.items()):
         if album_key(decision.country_or_region, decision.place_name) != target_key:
             continue
-        country, place = resolve_album_name(folder_name, decision)
+        country, place = resolve_album_location(country_or_region, folder_name, decision)
         image_locations[path] = updated_final_decision(decision, country, place)
 
 
@@ -1007,7 +1102,7 @@ def move_reviewed_images(
     if target is None:
         target = location_for_album_name(image_locations.values(), folder_name)
     if target is None:
-        country, place = resolve_album_name(folder_name, image_locations[selected[0]])
+        country, place = resolve_album_location("", folder_name, image_locations[selected[0]])
     else:
         country, place = target
     for path in selected:
@@ -1049,26 +1144,35 @@ def updated_final_decision(
     place: str,
     *,
     rationale_prefix: str = "User renamed final album",
+    confidence: float = 1.0,
 ) -> PlaceIdentification:
     return replace(
         decision,
         country_or_region=country,
         place_name=place,
-        confidence=1.0,
+        confidence=confidence,
         is_unknown=False if place and not place.casefold().startswith("unknown") else decision.is_unknown,
         rationale=f"{rationale_prefix}: {country}/{place}",
     )
 
 
+def resolve_album_location(
+    country_or_region: str | None,
+    folder_name: str,
+    original: PlaceIdentification,
+) -> tuple[str, str]:
+    country = (country_or_region or "").strip()
+    place = folder_name.strip()
+    if not country and "/" in place:
+        parsed_country, _, parsed_place = place.partition("/")
+        if parsed_country.strip() and parsed_place.strip():
+            country = parsed_country.strip()
+            place = parsed_place.strip()
+    return country or original.country_or_region, place or original.place_name
+
+
 def resolve_album_name(folder_name: str, original: PlaceIdentification) -> tuple[str, str]:
-    value = folder_name.strip()
-    if "/" in value:
-        country, _, place = value.partition("/")
-        country = country.strip()
-        place = place.strip()
-        if country and place:
-            return country, place
-    return original.country_or_region, value or original.place_name
+    return resolve_album_location("", folder_name, original)
 
 
 def album_key(country_or_region: str, place_name: str) -> str:
@@ -1097,6 +1201,24 @@ def resolve_location(
     for suggestion in suggestions:
         if normalize_text(suggestion.country_or_region) == normalized_country and normalize_text(suggestion.place_name) == normalized_place:
             return suggestion.country_or_region, suggestion.place_name
+    return country, place
+
+
+def country_supplied_by_user(country_or_region: str | None, place_name: str | None) -> bool:
+    if (country_or_region or "").strip():
+        return True
+    return bool(split_country_place(place_name))
+
+
+def split_country_place(value: str | None) -> tuple[str, str] | None:
+    text = (value or "").strip()
+    if "/" not in text:
+        return None
+    country, _, place = text.partition("/")
+    country = country.strip()
+    place = place.strip()
+    if not country or not place:
+        return None
     return country, place
 
 
@@ -1210,6 +1332,7 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
                 self.send_json(
                     state.rename_album(
                         str(payload.get("album_key") or ""),
+                        str(payload.get("country_or_region") or ""),
                         str(payload.get("place_name") or ""),
                         image_url_builder=state.image_url,
                     )
@@ -1440,24 +1563,25 @@ HTML = """<!doctype html>
       align-items: center;
       gap: 8px;
       margin: 0 0 10px;
+      flex-wrap: wrap;
     }
-    .album-heading h2 {
-      margin: 0;
+    .album-location-fields {
+      display: grid;
+      grid-template-columns: minmax(120px, 220px) auto minmax(160px, 340px);
+      align-items: center;
+      gap: 6px;
+      min-width: min(100%, 560px);
+    }
+    .album-country-wrap {
+      position: relative;
+    }
+    .album-location-input {
+      height: 34px;
       font-size: 18px;
       font-weight: 650;
     }
-    .album-name {
-      cursor: text;
-      border-bottom: 1px dashed transparent;
-    }
-    .album-name:hover,
-    .album-name:focus {
-      border-bottom-color: var(--accent);
-      color: var(--accent);
-    }
-    .album-name-input {
-      max-width: min(560px, 100%);
-      height: 34px;
+    .album-separator {
+      color: var(--muted);
       font-size: 18px;
       font-weight: 650;
     }
@@ -1744,6 +1868,7 @@ HTML = """<!doctype html>
     @media (max-width: 820px) {
       form { grid-template-columns: 1fr; }
       main { grid-template-columns: 1fr; }
+      .album-location-fields { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
       #progress {
         grid-template-columns: auto minmax(90px, 1fr);
         white-space: normal;
@@ -1784,6 +1909,41 @@ HTML = """<!doctype html>
   </main>
   <script>
     const GALLERY_PAGE_SIZE = 36;
+    const COUNTRY_OPTIONS = [
+      'Afghanistan', 'Albania', 'Algeria', 'Andorra', 'Angola', 'Antigua and Barbuda',
+      'Argentina', 'Armenia', 'Australia', 'Austria', 'Azerbaijan', 'Bahamas', 'Bahrain',
+      'Bangladesh', 'Barbados', 'Belarus', 'Belgium', 'Belize', 'Benin', 'Bhutan',
+      'Bolivia', 'Bosnia and Herzegovina', 'Botswana', 'Brazil', 'Brunei', 'Bulgaria',
+      'Burkina Faso', 'Burundi', 'Cabo Verde', 'Cambodia', 'Cameroon', 'Canada',
+      'Central African Republic', 'Chad', 'Chile', 'China', 'Colombia', 'Comoros',
+      'Congo', 'Costa Rica', 'Croatia', 'Cuba', 'Cyprus', 'Czechia',
+      'Democratic Republic of the Congo', 'Denmark', 'Djibouti', 'Dominica',
+      'Dominican Republic', 'Ecuador', 'Egypt', 'El Salvador', 'Equatorial Guinea',
+      'Eritrea', 'Estonia', 'Eswatini', 'Ethiopia', 'Fiji', 'Finland', 'France',
+      'Gabon', 'Gambia', 'Georgia', 'Germany', 'Ghana', 'Greece', 'Grenada',
+      'Guatemala', 'Guinea', 'Guinea-Bissau', 'Guyana', 'Haiti', 'Honduras',
+      'Hungary', 'Iceland', 'India', 'Indonesia', 'Iran', 'Iraq', 'Ireland',
+      'Israel', 'Italy', 'Jamaica', 'Japan', 'Jordan', 'Kazakhstan', 'Kenya',
+      'Kiribati', 'Kuwait', 'Kyrgyzstan', 'Laos', 'Latvia', 'Lebanon', 'Lesotho',
+      'Liberia', 'Libya', 'Liechtenstein', 'Lithuania', 'Luxembourg', 'Madagascar',
+      'Malawi', 'Malaysia', 'Maldives', 'Mali', 'Malta', 'Marshall Islands',
+      'Mauritania', 'Mauritius', 'Mexico', 'Micronesia', 'Moldova', 'Monaco',
+      'Mongolia', 'Montenegro', 'Morocco', 'Mozambique', 'Myanmar', 'Namibia',
+      'Nauru', 'Nepal', 'Netherlands', 'New Zealand', 'Nicaragua', 'Niger',
+      'Nigeria', 'North Korea', 'North Macedonia', 'Norway', 'Oman', 'Pakistan',
+      'Palau', 'Panama', 'Papua New Guinea', 'Paraguay', 'Peru', 'Philippines',
+      'Poland', 'Portugal', 'Qatar', 'Romania', 'Russia', 'Rwanda',
+      'Saint Kitts and Nevis', 'Saint Lucia', 'Saint Vincent and the Grenadines',
+      'Samoa', 'San Marino', 'Sao Tome and Principe', 'Saudi Arabia', 'Senegal',
+      'Serbia', 'Seychelles', 'Sierra Leone', 'Singapore', 'Slovakia', 'Slovenia',
+      'Solomon Islands', 'Somalia', 'South Africa', 'South Korea', 'South Sudan',
+      'Spain', 'Sri Lanka', 'Sudan', 'Suriname', 'Sweden', 'Switzerland', 'Syria',
+      'Taiwan', 'Tajikistan', 'Tanzania', 'Thailand', 'Timor-Leste', 'Togo',
+      'Tonga', 'Trinidad and Tobago', 'Tunisia', 'Turkey', 'Turkmenistan', 'Tuvalu',
+      'Uganda', 'Ukraine', 'United Arab Emirates', 'United Kingdom', 'United States',
+      'Uruguay', 'Uzbekistan', 'Vanuatu', 'Vatican City', 'Venezuela', 'Vietnam',
+      'Yemen', 'Zambia', 'Zimbabwe'
+    ];
 
     let current = null;
     let activeSuggestion = null;
@@ -1836,7 +1996,7 @@ HTML = """<!doctype html>
       }
       if (current.final_review) {
         renderFinalReview();
-        if (current.images_loading) {
+        if (current.images_loading || current.country_guesses_loading) {
           setTimeout(loadState, 900);
         }
         return;
@@ -2241,20 +2401,9 @@ HTML = """<!doctype html>
           event.stopPropagation();
         });
         albumCheckbox.addEventListener('change', () => toggleAlbumSelection(album));
-        const name = document.createElement('h2');
-        name.className = 'album-name';
-        name.tabIndex = 0;
-        name.title = 'Edit folder name';
-        name.textContent = album.place_name || 'Untitled album';
-        name.addEventListener('click', () => editAlbumName(album, name));
-        name.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            editAlbumName(album, name);
-          }
-        });
+        const fields = createAlbumLocationFields(album);
         heading.appendChild(albumCheckbox);
-        heading.appendChild(name);
+        heading.appendChild(fields);
         section.appendChild(heading);
 
         const gallery = document.createElement('div');
@@ -2583,45 +2732,121 @@ HTML = """<!doctype html>
       render();
     }
 
-    function editAlbumName(album, nameNode) {
-      const input = document.createElement('input');
-      input.className = 'album-name-input';
-      input.value = album.place_name || '';
-      let finished = false;
+    function createAlbumLocationFields(album) {
+      const fields = document.createElement('div');
+      fields.className = 'album-location-fields';
 
-      async function save() {
-        if (finished) return;
-        finished = true;
-        await renameAlbum(album.key, input.value);
-      }
-
-      function cancel() {
-        if (finished) return;
-        finished = true;
-        renderFinalReview();
-      }
-
-      input.addEventListener('keydown', (event) => {
+      const countryWrap = document.createElement('div');
+      countryWrap.className = 'album-country-wrap';
+      const country = document.createElement('input');
+      country.className = 'album-location-input album-country-input';
+      country.value = album.country_or_region || '';
+      country.autocomplete = 'off';
+      country.placeholder = 'Country';
+      country.title = 'Edit country or region';
+      country.setAttribute('aria-label', `Country or region for ${album.place_name || 'this album'}`);
+      const suggestions = document.createElement('div');
+      suggestions.className = 'suggestions';
+      suggestions.hidden = true;
+      country.addEventListener('input', () => renderCountrySuggestions(country, suggestions, album));
+      country.addEventListener('focus', () => renderCountrySuggestions(country, suggestions, album));
+      country.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          save();
+          renameAlbum(album.key, country.value, albumInput.value);
         }
-        if (event.key === 'Escape') {
+        if (event.key === 'Escape') suggestions.hidden = true;
+      });
+      country.addEventListener('blur', () => {
+        setTimeout(() => { suggestions.hidden = true; }, 100);
+        renameAlbum(album.key, country.value, albumInput.value);
+      });
+      countryWrap.appendChild(country);
+      countryWrap.appendChild(suggestions);
+
+      const separator = document.createElement('span');
+      separator.className = 'album-separator';
+      separator.textContent = ':';
+
+      const albumInput = document.createElement('input');
+      albumInput.className = 'album-location-input album-name-input';
+      albumInput.value = album.place_name || '';
+      albumInput.placeholder = 'Album';
+      albumInput.title = 'Edit folder name';
+      albumInput.setAttribute('aria-label', `Album name for ${album.country_or_region || 'this country'}`);
+      albumInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
           event.preventDefault();
-          cancel();
+          renameAlbum(album.key, country.value, albumInput.value);
         }
       });
-      input.addEventListener('blur', save);
-      nameNode.replaceWith(input);
-      input.focus();
-      input.select();
+      albumInput.addEventListener('blur', () => renameAlbum(album.key, country.value, albumInput.value));
+
+      fields.appendChild(countryWrap);
+      fields.appendChild(separator);
+      fields.appendChild(albumInput);
+      return fields;
     }
 
-    async function renameAlbum(albumKey, placeName) {
+    function fuzzyCountryScore(query, country) {
+      const q = normalize(query);
+      const value = normalize(country);
+      if (!q) return 10;
+      if (value === q) return 100;
+      if (value.startsWith(q)) return 80;
+      if (value.includes(q)) return 50;
+      let cursor = 0;
+      for (const char of q) {
+        cursor = value.indexOf(char, cursor);
+        if (cursor === -1) return -1;
+        cursor += 1;
+      }
+      return 20;
+    }
+
+    function countrySuggestionOptions(query, currentCountry) {
+      const custom = (query || '').trim();
+      const options = [...COUNTRY_OPTIONS];
+      if (currentCountry && !options.some((country) => normalize(country) === normalize(currentCountry))) {
+        options.unshift(currentCountry);
+      }
+      return options
+        .map((country) => ({country, score: fuzzyCountryScore(query, country)}))
+        .filter((item) => item.score >= 0)
+        .sort((a, b) => b.score - a.score || a.country.localeCompare(b.country))
+        .slice(0, custom ? 8 : 10);
+    }
+
+    function renderCountrySuggestions(input, root, album) {
+      const options = countrySuggestionOptions(input.value, album.country_or_region);
+      if (!options.length) {
+        root.hidden = true;
+        return;
+      }
+      root.innerHTML = '';
+      options.forEach((option, index) => {
+        const item = document.createElement('div');
+        item.className = `suggestion${index === 0 ? ' active' : ''}`;
+        item.setAttribute('role', 'option');
+        const label = document.createElement('strong');
+        label.textContent = option.country;
+        item.appendChild(label);
+        item.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          input.value = option.country;
+          root.hidden = true;
+          renameAlbum(album.key, input.value, input.closest('.album-location-fields').querySelector('.album-name-input').value);
+        });
+        root.appendChild(item);
+      });
+      root.hidden = false;
+    }
+
+    async function renameAlbum(albumKey, countryOrRegion, placeName) {
       const response = await fetch('/api/final/album', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({album_key: albumKey, place_name: placeName})
+        body: JSON.stringify({album_key: albumKey, country_or_region: countryOrRegion, place_name: placeName})
       });
       current = await response.json();
       render();
@@ -2648,7 +2873,7 @@ HTML = """<!doctype html>
     }
 
     async function submitDecision(place) {
-      let country = current.country_or_region || '';
+      let country = '';
       const typedLocation = splitLocation(place);
       if (typedLocation) {
         country = typedLocation.country;

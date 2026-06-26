@@ -43,6 +43,8 @@ def write_dryrun_file(plan: Plan, source: Path) -> Path:
 
 
 def destination_tree_base(plan: Plan) -> Path:
+    if plan.metadata.get("kind") == "organize" and plan.metadata.get("organization_root"):
+        return Path(str(plan.metadata["organization_root"]))
     if plan.metadata.get("kind") == "organize" and plan.metadata.get("library"):
         return Path(str(plan.metadata["library"])) / "Originals"
     destinations = [Path(operation.dest) for operation in plan.operations if operation.dest]

@@ -30,16 +30,15 @@ The core product shape is a plan-first CLI:
 
 ```text
 Library Root/
-  Originals/
-    Italy/
-      Lago-de-Brailes/
-      Rome/
-      Cinque-Torri/
-    Washington/
-      Snoqualmie-Falls-June-2026/
-      Snoqualmie-Falls-July-2026/
-    Unsorted/
-      103NCZ_6/
+  Italy/
+    Lago-de-Brailes/
+    Rome/
+    Cinque-Torri/
+  Washington/
+    Snoqualmie-Falls-June-2026/
+    Snoqualmie-Falls-July-2026/
+  Unsorted/
+    103NCZ_6/
   Trash/
     Duplicates/
     Junk/
@@ -85,7 +84,7 @@ The folder tree is the source of truth. Curator may keep a SQLite catalog and si
 
 ### Curated Means Hands Off
 
-Once media has been moved into `Originals/`, Curator's normal job is done. The user may move files between albums and rename folders freely. Ongoing Curator commands must not undo those changes unless the user explicitly runs a future nuclear repair or migration command on specific folders.
+Once media has been moved into the organized `Country/Album` tree, Curator's normal job is done. The user may move files between albums and rename folders freely. Ongoing Curator commands must not undo those changes unless the user explicitly runs a future nuclear repair or migration command on specific folders.
 
 ### Exact Dedupe
 
@@ -98,7 +97,7 @@ Every applied operation should be logged in JSON Lines, with a human-readable su
 Example:
 
 ```json
-{"time":"2026-06-24T14:42:00-07:00","op":"move","src":"/source/DCIM/DSC_1234.NEF","dest":"/library/Trash/Duplicates/run/Drive__DCIM__DSC_1234.NEF","reason":"duplicate","kept":"/library/Originals/Italy/Rome/DSC_1234.NEF"}
+{"time":"2026-06-24T14:42:00-07:00","op":"move","src":"/source/DCIM/DSC_1234.NEF","dest":"/library/Trash/Duplicates/run/Drive__DCIM__DSC_1234.NEF","reason":"duplicate","kept":"/library/Italy/Rome/DSC_1234.NEF"}
 ```
 
 ## 5. Main Workflows
@@ -147,7 +146,7 @@ curator organize --mode migration --transfer copy --source /Volumes/OldDrive --l
 
 Ongoing mode is conservative:
 
-- Treats `Originals/` as curated.
+- Treats the organized `Country/Album` tree as curated.
 - Processes unprocessed input folders only.
 - Does not reorganize existing curated albums.
 - May compare against existing library files for dedupe, but should avoid moving curated files to trash unless explicitly asked.
@@ -163,7 +162,7 @@ Migration mode is broader:
 
 ### Merge Travel SSD To Home Server
 
-Once media is organized on the travel SSD, merging to the home server should usually be a simple checked move/copy from one `Originals/` tree into another.
+Once media is organized on the travel SSD, merging to the home server should usually be a simple checked move/copy from one `Country/Album` tree into another.
 
 Rules:
 
@@ -259,7 +258,7 @@ Important options:
 
 ### `curator organize`
 
-Builds an organization plan from unprocessed media into `Originals/`.
+Builds an organization plan from unprocessed media into `Country/Album` folders at the library root.
 
 Important options:
 
@@ -275,7 +274,7 @@ Important options:
 --apply
 ```
 
-The top-level `curator --source SOURCE --dest DEST` command is the preferred reviewed workflow. It opens the review UI, stages `SOURCE/DRYRUN.txt` after the final `Looks good`, then waits for `Commit` before copying from Source into `DEST/Originals/`.
+The top-level `curator --source SOURCE --dest DEST` command is the preferred reviewed workflow. It opens the review UI, stages `SOURCE/DRYRUN.txt` after the final `Looks good`, then waits for `Commit` before copying from Source into `DEST/<Country>/<Album>/`.
 
 `--identify-places` samples up to two images from each bundled folder, sends those samples to the OpenRouter place-identification stage, and uses the returned `country_or_region` and `place_name` to name planned destination folders.
 
@@ -339,15 +338,16 @@ Future command for generating AWS Deep Glacier backup manifests.
 
 ## 7. Storage Model
 
-Curator expects a library root containing:
+Curator expects a library root containing organized album folders plus Curator metadata:
 
 ```text
-Originals/
+Country-Or-Region/
+  Human-Friendly-Place/
 Trash/
 .curator/
 ```
 
-`Originals/` is user-facing and manually editable.
+The `Country/Album` folders are user-facing and manually editable.
 
 `Trash/` is user-facing and manually reviewable. Curator can move items into it but does not empty it.
 
@@ -488,18 +488,16 @@ This keeps RAW/JPEG capture time, video creation time, and iPhone-style media me
 Canonical album layout:
 
 ```text
-Originals/
-  Country-Or-Region/
-    Human-Friendly-Place/
+Country-Or-Region/
+  Human-Friendly-Place/
 ```
 
 If the same place appears more than once, add enough time context to distinguish the albums:
 
 ```text
-Originals/
-  Washington/
-    Snoqualmie-Falls-June-2026/
-    Snoqualmie-Falls-July-2026/
+Washington/
+  Snoqualmie-Falls-June-2026/
+  Snoqualmie-Falls-July-2026/
 ```
 
 Location inference should favor low-touch automation, but with reviewable evidence.
@@ -517,8 +515,8 @@ Curator should generate human-friendly names rather than strict geocoder names.
 For low-confidence cases, Curator can use temporary names:
 
 ```text
-Originals/Unsorted/2026-06-13-Bend-Oregon-Candidate/
-Originals/Unsorted/Shoot-001/
+Unsorted/2026-06-13-Bend-Oregon-Candidate/
+Unsorted/Shoot-001/
 ```
 
 ## 14. Junk Classification
@@ -623,5 +621,5 @@ This should be designed after local ingest, organization, and dedupe are trustwo
 - What confidence threshold should allow automatic location naming without review?
 - How should Curator detect mounted SD and CFexpress cards on macOS: Disk Arbitration, `diskutil`, filesystem heuristics, or all of the above?
 - Should Curator eventually run as a restricted macOS user for stronger OS-level safety?
-- What should the exact policy be when duplicate files are found inside already curated `Originals/`?
+- What should the exact policy be when duplicate files are found inside already curated album folders?
 - How should NTFS read/write behavior be handled during migration before drives are reformatted as ExFAT?

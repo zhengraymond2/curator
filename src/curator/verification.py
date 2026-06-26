@@ -83,9 +83,18 @@ def verify_organize_copy_plan(
             source_scan_available = True
             scanned_source_paths = {media.path.expanduser().resolve() for media in scan_media(source_root)}
     library_value = plan.metadata.get("library")
-    if plan.metadata.get("mode") == "ongoing" and isinstance(library_value, str):
-        originals = Path(library_value).expanduser().resolve() / "Originals"
-        scanned_source_paths = {path for path in scanned_source_paths if not is_relative_to(path, originals)}
+    organization_root_value = plan.metadata.get("organization_root")
+    if plan.metadata.get("mode") == "ongoing":
+        if isinstance(organization_root_value, str):
+            organization_root = Path(organization_root_value).expanduser().resolve()
+            outside_organization_root = {
+                path for path in scanned_source_paths if not is_relative_to(path, organization_root)
+            }
+            if outside_organization_root:
+                scanned_source_paths = outside_organization_root
+        elif isinstance(library_value, str):
+            originals = Path(library_value).expanduser().resolve() / "Originals"
+            scanned_source_paths = {path for path in scanned_source_paths if not is_relative_to(path, originals)}
     planned_source_set = set(planned_sources)
     aggregate_source_paths = scanned_source_paths if source_scan_available else planned_source_set
 

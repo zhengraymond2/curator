@@ -23,6 +23,7 @@ from .place_identification import (
     PhotoCandidate,
     PlaceIdentification,
     PreparedImage,
+    load_country_identification_prompt,
     load_place_identification_prompt,
     select_place_identification_samples,
 )
@@ -92,7 +93,8 @@ def build_organize_plan(
     library = library.expanduser().resolve()
     if not source.is_dir():
         raise ValueError(f"organize source must be a directory: {source}")
-    originals = library / "Originals"
+    organization_root = library
+    legacy_originals = library / "Originals"
     run_id = new_run_id(f"organize-{mode}")
     with progress.step(
         f"Scanning {source} for media files",
@@ -108,10 +110,7 @@ def build_organize_plan(
         done=lambda: f"Planning {len(timestamped_files)} media file(s)",
         debug=True,
     ):
-        for media in files:
-            if mode == "ongoing" and is_relative_to(media.path, originals):
-                continue
-            timestamped_files.append(media)
+        timestamped_files.extend(filter_organize_source_files(files, mode=mode, organization_root=organization_root, legacy_originals=legacy_originals))
     timestamps = capture_timestamps(
         [media.path for media in timestamped_files],
         cache_path=timestamp_cache,
@@ -159,7 +158,7 @@ def build_organize_plan(
                 else:
                     country_name, folder_name = bundle_destination_names(bundle, image_identification)
                 captured = timestamps[media.path]
-                dest = originals / country_name / folder_name / media.path.name
+                dest = organization_root / country_name / folder_name / media.path.name
                 place_identification = image_identification or identifications.get(bundle.group_id)
                 operations.append(
                     Operation(
@@ -187,7 +186,7 @@ def build_organize_plan(
 
     return make_plan(
         run_id=run_id,
-        description=f"organize {source} into {originals} ({mode}, {transfer})",
+        description=f"organize {source} into {organization_root} ({mode}, {transfer})",
         operations=operations,
         metadata={
             "kind": "organize",
@@ -195,10 +194,11 @@ def build_organize_plan(
             "transfer": transfer,
             "source": str(source),
             "library": str(library),
+            "organization_root": str(organization_root),
             "files_planned": len(operations),
             "bundle_count": len(bundles),
             "identified_bundle_count": len(identifications),
-            "layout": "Originals/Country/Album",
+            "layout": "Country/Album",
             "unknown_country": "Unsorted",
             "timestamp_source": "exiftool_then_sips_then_mdls_then_filesystem_mtime",
             "metadata_cache": str(timestamp_cache),
@@ -262,6 +262,25 @@ def build_media_bundles(
         flush()
 
     return bundles
+
+
+def filter_organize_source_files(
+    files: Sequence[MediaFile],
+    *,
+    mode: str,
+    organization_root: Path,
+    legacy_originals: Path,
+) -> list[MediaFile]:
+    if mode != "ongoing":
+        return list(files)
+
+    outside_organization_root = [
+        media for media in files if not is_relative_to(media.path, organization_root)
+    ]
+    if outside_organization_root:
+        return outside_organization_root
+
+    return [media for media in files if not is_relative_to(media.path, legacy_originals)]
 
 
 def filename_ranks(group: list[MediaFile]) -> dict[Path, int]:
@@ -400,6 +419,7 @@ def identify_bundle_places_with_review_ui(
         jpeg_quality=max(1, min(95, DEFAULT_JPEG_QUALITY)),
     )
     base_prompt = load_place_identification_prompt()
+    country_prompt = load_country_identification_prompt()
     jobs: list[ReviewAssetJob] = []
     items: list[ReviewItem] = []
 
@@ -424,6 +444,17 @@ def identify_bundle_places_with_review_ui(
     progress.log(f"Opening browser review UI for {len(items)} bundle(s)")
 
     def start_background_work(state: ReviewState) -> None:
+        state.country_guess_starter = (
+            lambda group_id, album_name, prepared_images: start_country_identification(
+                state,
+                identifier=identifier,
+                group_id=group_id,
+                album_name=album_name,
+                prepared_images=prepared_images,
+                prompt=country_prompt,
+                progress=progress,
+            )
+        )
         start_review_asset_preparation(
             state,
             jobs=tuple(jobs),
@@ -495,6 +526,7 @@ def start_review_asset_preparation(
                 continue
 
             prepared_samples_by_group[bundle.group_id] = prepared_samples
+            state.store_model_images(bundle.group_id, prepared_samples)
             state.store_images(bundle.group_id, prepared_samples, complete=False)
             start_llm_identification(
                 state,
@@ -516,6 +548,48 @@ def start_review_asset_preparation(
     thread = threading.Thread(
         target=prepare_assets,
         name="curator-review-assets",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def start_country_identification(
+    state: ReviewState,
+    *,
+    identifier: OpenRouterPlaceIdentifier,
+    group_id: str,
+    album_name: str,
+    prepared_images: tuple[PreparedImage, ...],
+    prompt: str,
+    progress: ProgressReporter,
+) -> threading.Thread:
+    def identify() -> None:
+        if not prepared_images:
+            state.store_country_guess_error(group_id, ValueError("No sampled images available for country identification."))
+            return
+        try:
+            identify_country = getattr(identifier, "identify_country_for_album", None)
+            if callable(identify_country):
+                identification = identify_country(group_id, album_name, prepared_images, prompt=prompt)
+            else:
+                identification = identifier.identify_prepared_images(
+                    group_id,
+                    prepared_images,
+                    prompt=f"{prompt}\n\nAlbum name selected by the user: {album_name}",
+                )
+                identification = replace(identification, place_name=album_name)
+        except Exception as exc:
+            state.store_country_guess_error(group_id, exc)
+            progress.log(f"LLM country identification failed for {group_id}: {exc}")
+            return
+
+        state.store_country_guess(group_id, album_name, identification)
+        progress.log(f"LLM country identification ready for {group_id}", debug=True)
+
+    thread = threading.Thread(
+        target=identify,
+        name=f"curator-country-{safe_component(group_id, 'group')}",
         daemon=True,
     )
     thread.start()

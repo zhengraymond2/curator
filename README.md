@@ -42,7 +42,7 @@ curator --source /Volumes/mySD --dest /Volumes/myHD
 
 Curator opens the browser review, writes `SOURCE/DRYRUN.txt` after `Looks good`,
 then waits for `Commit`. Commit copies directly from Source into
-`DEST/Originals/` and validates the destination against the original files.
+`DEST/<Country>/<Album>/` and validates the destination against the original files.
 
 For place identification, create `.env`:
 
