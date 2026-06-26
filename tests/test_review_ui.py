@@ -157,6 +157,7 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('albumImagesSelected', HTML)
         self.assertIn('toggleAlbumSelection', HTML)
         self.assertIn('deselectFinalImages', HTML)
+        self.assertIn('confirmMoveTo(item.album.place_name)', HTML)
         self.assertIn('--finder-blue: #0a84ff', HTML)
         self.assertIn('var(--finder-blue)', HTML)
         self.assertNotIn("country.textContent = album.country_or_region", HTML)

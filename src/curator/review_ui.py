@@ -1665,6 +1665,7 @@ HTML = """<!doctype html>
           const input = document.getElementById('move-input');
           input.value = item.album.place_name;
           root.hidden = true;
+          confirmMoveTo(item.album.place_name);
         });
         root.appendChild(div);
       });
