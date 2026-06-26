@@ -503,9 +503,6 @@ HTML = """<!doctype html>
     .suggestion.active {
       background: #e8f3f1;
     }
-    .suggestion.create-new {
-      border-top: 1px solid var(--line);
-    }
     .suggestion strong { font-size: 14px; }
     .suggestion span { color: var(--muted); font-size: 12px; }
     main {
@@ -681,8 +678,8 @@ HTML = """<!doctype html>
     </div>
     <form id="review-form">
       <div class="place-wrap">
-        <input id="place" autocomplete="off" placeholder="Location or album name">
-        <div class="suggestions" id="suggestions" hidden></div>
+        <input id="place" autocomplete="off" placeholder="Location or album name" aria-autocomplete="list" aria-controls="suggestions">
+        <div class="suggestions" id="suggestions" role="listbox" hidden></div>
       </div>
       <button class="primary" type="submit">Save / Continue</button>
     </form>
@@ -706,9 +703,11 @@ HTML = """<!doctype html>
 
     let current = null;
     let activeSuggestion = null;
+    let suggestionDraft = '';
+    let suggestionOptions = [];
+    let activeSuggestionIndex = -1;
     let lastGroupId = null;
     let placeDirty = false;
-    let createNewAlbum = false;
     let galleryObserver = null;
     let galleryRenderedCount = 0;
     let selectedImageIndex = -1;
@@ -742,7 +741,7 @@ HTML = """<!doctype html>
         resetGalleryObserver();
         lastGroupId = null;
         placeDirty = false;
-        createNewAlbum = false;
+        resetSuggestionState();
         updateProgress();
         const gallery = document.getElementById('gallery');
         if (gallery) gallery.innerHTML = '<div class="loading">Preparing the next album suggestion...</div>';
@@ -761,13 +760,15 @@ HTML = """<!doctype html>
         resetGalleryObserver();
         lastGroupId = current.group_id;
         placeDirty = false;
-        activeSuggestion = null;
-        createNewAlbum = false;
+        resetSuggestionState();
       }
       updateProgress();
       const placeInput = document.getElementById('place');
       if (!placeDirty) {
         placeInput.value = current.place_name || '';
+        suggestionDraft = placeInput.value;
+        activeSuggestionIndex = suggestionDraft.trim() ? 0 : -1;
+        activeSuggestion = null;
       }
       document.getElementById('group').textContent = current.group_id;
       document.getElementById('file-count').textContent = current.file_count;
@@ -1016,7 +1017,7 @@ HTML = """<!doctype html>
         country = typedLocation.country;
         place = typedLocation.place;
       }
-      if (!createNewAlbum && activeSuggestion && normalize(place) !== normalize(current.place_name)) {
+      if (activeSuggestion && normalize(place) === normalize(activeSuggestion.place_name)) {
         country = activeSuggestion.country_or_region;
         place = activeSuggestion.place_name;
       }
@@ -1068,61 +1069,105 @@ HTML = """<!doctype html>
       return score;
     }
 
+    function resetSuggestionState() {
+      activeSuggestion = null;
+      suggestionDraft = '';
+      suggestionOptions = [];
+      activeSuggestionIndex = -1;
+    }
+
     function renderSuggestions() {
       const root = document.getElementById('suggestions');
       if (!current) {
         root.hidden = true;
-        activeSuggestion = null;
-        createNewAlbum = false;
+        resetSuggestionState();
         return;
       }
-      const query = document.getElementById('place').value;
-      createNewAlbum = false;
+      const query = suggestionDraft;
+      const hasDraft = query.trim().length > 0;
       const ranked = (current.suggestions || [])
         .map((suggestion) => ({suggestion, score: fuzzyScore(query, suggestion)}))
         .filter((item) => item.score >= 0)
         .sort((a, b) => b.score - a.score || a.suggestion.place_name.localeCompare(b.suggestion.place_name))
-        .slice(0, 8);
-      const newAlbumName = query.trim();
-      if (!ranked.length && !newAlbumName) {
+        .slice(0, hasDraft ? 7 : 8);
+      suggestionOptions = [
+        ...(hasDraft ? [{kind: 'typed', value: query, detail: current.country_or_region || '', suggestion: null}] : []),
+        ...ranked.map((item) => ({
+          kind: 'existing',
+          value: item.suggestion.place_name,
+          detail: item.suggestion.country_or_region,
+          suggestion: item.suggestion,
+        })),
+      ];
+      if (!suggestionOptions.length) {
         root.hidden = true;
+        activeSuggestion = null;
+        activeSuggestionIndex = -1;
+        return;
+      }
+      if (activeSuggestionIndex < 0 || activeSuggestionIndex >= suggestionOptions.length) {
+        activeSuggestionIndex = 0;
+      }
+      root.innerHTML = '';
+      suggestionOptions.forEach((option, index) => {
+        const item = document.createElement('div');
+        item.className = 'suggestion';
+        item.id = `suggestion-${index}`;
+        item.setAttribute('role', 'option');
+
+        const label = document.createElement('strong');
+        label.textContent = option.value;
+        item.appendChild(label);
+        if (option.detail) {
+          const detail = document.createElement('span');
+          detail.textContent = option.detail;
+          item.appendChild(detail);
+        }
+
+        item.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          applySuggestionSelection(index);
+          root.hidden = true;
+        });
+        root.appendChild(item);
+      });
+      root.hidden = false;
+      applySuggestionSelection(activeSuggestionIndex, {updateInput: false});
+    }
+
+    function applySuggestionSelection(index, options = {}) {
+      if (!suggestionOptions.length) {
+        activeSuggestionIndex = -1;
         activeSuggestion = null;
         return;
       }
-      activeSuggestion = ranked.length ? ranked[0].suggestion : null;
-      root.innerHTML = '';
-      ranked.forEach((item, index) => {
-        const div = document.createElement('div');
-        div.className = `suggestion${index === 0 ? ' active' : ''}`;
-        div.innerHTML = `<strong>${item.suggestion.place_name}</strong><span>${item.suggestion.country_or_region}</span>`;
-        div.addEventListener('mousedown', (event) => {
-          event.preventDefault();
-          activeSuggestion = item.suggestion;
-          createNewAlbum = false;
-          document.getElementById('place').value = item.suggestion.place_name;
-          root.hidden = true;
-        });
-        root.appendChild(div);
-      });
-      if (newAlbumName) {
-        const create = document.createElement('div');
-        create.className = 'suggestion create-new';
-        const label = document.createElement('strong');
-        label.textContent = `Create New Album: ${newAlbumName}`;
-        const detail = document.createElement('span');
-        detail.textContent = current.country_or_region || '';
-        create.appendChild(label);
-        create.appendChild(detail);
-        create.addEventListener('mousedown', (event) => {
-          event.preventDefault();
-          activeSuggestion = null;
-          createNewAlbum = true;
-          document.getElementById('place').value = newAlbumName;
-          root.hidden = true;
-        });
-        root.appendChild(create);
+      const updateInput = options.updateInput !== false;
+      activeSuggestionIndex = Math.max(0, Math.min(index, suggestionOptions.length - 1));
+      const option = suggestionOptions[activeSuggestionIndex];
+      activeSuggestion = option.suggestion || null;
+      const placeInput = document.getElementById('place');
+      if (updateInput) {
+        placeInput.value = option.value;
+        placeDirty = true;
       }
-      root.hidden = false;
+      placeInput.setAttribute('aria-activedescendant', `suggestion-${activeSuggestionIndex}`);
+      const root = document.getElementById('suggestions');
+      Array.from(root.children).forEach((node, nodeIndex) => {
+        const active = nodeIndex === activeSuggestionIndex;
+        node.classList.toggle('active', active);
+        node.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      const activeNode = root.children[activeSuggestionIndex];
+      if (activeNode && updateInput) {
+        activeNode.scrollIntoView({block: 'nearest'});
+      }
+    }
+
+    function moveSuggestionSelection(delta) {
+      if (!suggestionOptions.length) return;
+      const currentIndex = activeSuggestionIndex < 0 ? 0 : activeSuggestionIndex;
+      const nextIndex = (currentIndex + delta + suggestionOptions.length) % suggestionOptions.length;
+      applySuggestionSelection(nextIndex);
     }
 
     document.getElementById('review-form').addEventListener('submit', (event) => {
@@ -1131,9 +1176,20 @@ HTML = """<!doctype html>
       submitDecision(document.getElementById('place').value);
     });
 
-    document.getElementById('place').addEventListener('input', () => {
+    document.getElementById('place').addEventListener('input', (event) => {
       placeDirty = true;
+      suggestionDraft = event.target.value;
+      activeSuggestion = null;
+      activeSuggestionIndex = 0;
       renderSuggestions();
+    });
+
+    document.getElementById('place').addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      event.preventDefault();
+      const root = document.getElementById('suggestions');
+      if (root.hidden) renderSuggestions();
+      moveSuggestionSelection(event.key === 'ArrowDown' ? 1 : -1);
     });
 
     window.addEventListener('keydown', (event) => {
@@ -1145,7 +1201,7 @@ HTML = """<!doctype html>
         }
         document.getElementById('suggestions').hidden = true;
         activeSuggestion = null;
-        createNewAlbum = false;
+        activeSuggestionIndex = -1;
       }
       if (isSpaceKey(event) && !isTextInputTarget(event.target) && selectedImageIndex >= 0 && !expandedView) {
         event.preventDefault();
@@ -1157,6 +1213,7 @@ HTML = """<!doctype html>
         return;
       }
       if (event.key === 'Enter') {
+        event.preventDefault();
         document.getElementById('review-form').requestSubmit();
       }
     });

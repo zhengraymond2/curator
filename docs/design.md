@@ -231,7 +231,7 @@ Important options:
 
 The review UI keeps a list of previously entered places and uses it in two ways:
 
-- The place field offers case-insensitive fuzzy suggestions. Selecting or exactly retyping an existing place reuses the same destination folder.
+- The place field offers case-insensitive fuzzy suggestions. The first dropdown item is the typed album name, selected by default, followed by matching existing places. Up/Down moves through the menu and replaces the textbox with the selected item; Enter saves the textbox value. Selecting or exactly retyping an existing place reuses the same destination folder.
 - Each reviewed location is appended to the context for later model prompts. The most recent country/region is treated as the active context, so a user-entered country switch such as `Guatemala` makes later prompts prefer Guatemala context rather than older Costa Rica context.
 
 Example `DRYRUN.txt`:

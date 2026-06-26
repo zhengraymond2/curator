@@ -99,9 +99,17 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn('id="place"', HTML)
         self.assertIn('placeholder="Location or album name"', HTML)
 
-    def test_review_html_offers_create_new_album_suggestion(self) -> None:
-        self.assertIn("Create New Album:", HTML)
-        self.assertIn("createNewAlbum", HTML)
+    def test_review_html_keeps_typed_album_as_first_suggestion(self) -> None:
+        self.assertIn("suggestionDraft", HTML)
+        self.assertIn("kind: 'typed'", HTML)
+        self.assertIn("activeSuggestionIndex = 0", HTML)
+        self.assertNotIn("Create New Album:", HTML)
+        self.assertNotIn("createNewAlbum", HTML)
+
+    def test_review_html_supports_suggestion_arrow_navigation(self) -> None:
+        self.assertIn("event.key !== 'ArrowDown' && event.key !== 'ArrowUp'", HTML)
+        self.assertIn("moveSuggestionSelection(event.key === 'ArrowDown' ? 1 : -1)", HTML)
+        self.assertIn("applySuggestionSelection(nextIndex)", HTML)
 
     def test_review_html_paginates_gallery_images(self) -> None:
         self.assertIn("const GALLERY_PAGE_SIZE", HTML)
