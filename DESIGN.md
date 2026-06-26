@@ -188,6 +188,38 @@ curator trash-report --help
 curator glacier-plan --help
 ```
 
+### Setup And Global Wrapper
+
+The default setup path is:
+
+```sh
+make
+```
+
+`make` runs the `setup` target, which:
+
+- runs `scripts/env` to create `.venv/` and install Curator editable
+- writes a global wrapper to `~/bin/curator`
+- adds the wrapper directory to `~/.zshrc` when absent
+
+The wrapper records the checkout root used when `make` was run. On every
+invocation it checks whether `.venv/bin/curator` exists and whether
+`pyproject.toml` or `scripts/env` is newer than `.venv/.curator-env-stamp`. If
+setup is stale, the wrapper re-runs `scripts/env` before executing the venv
+entry point. This means a fresh computer can clone Curator, run `make`, open a
+new shell, and then use `curator` without manually activating the venv.
+
+Useful development targets:
+
+```text
+make venv
+make test
+make compile
+make clean
+make clean-venv
+make uninstall-global
+```
+
 ### `curator ingest`
 
 Copies a mounted card or source folder into an ingest folder with checksum verification.
@@ -526,7 +558,7 @@ Curator should:
 For development and testing, no command should touch external volumes unless explicitly invoked by the user. Generated tests must stay under:
 
 ```text
-/Users/rzheng/dev/curator/test/
+CHECKOUT_ROOT/test/
 ```
 
 ## 17. Existing Library Migration

@@ -90,6 +90,7 @@ _CURATOR_CURRENT_STAMP="$(cat "$_CURATOR_STAMP" 2>/dev/null || true)"
 
 if [ ! -f "$_CURATOR_STAMP" ] ||
   [ "$_CURATOR_ROOT/pyproject.toml" -nt "$_CURATOR_STAMP" ] ||
+  [ "$_CURATOR_ENV_SCRIPT" -nt "$_CURATOR_STAMP" ] ||
   [ "$_CURATOR_CURRENT_STAMP" != "$_CURATOR_STAMP_VALUE" ]; then
   python -m pip install --upgrade pip setuptools wheel ||
     { _curator_env_fail "failed to upgrade Python packaging tools"; return 1; }
