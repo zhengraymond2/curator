@@ -106,8 +106,9 @@ result arrives, the UI fills in the model guess, confidence, rationale, and
 evidence. Press Enter or click `Save / Continue` to advance. The location
 textbox accepts `Country/Place` or a place name, and suggests previously entered
 places with case-insensitive fuzzy matching; selecting an existing place reuses
-the same destination folder. Use `Create New Album: XYZ` at the bottom of the
-dropdown to keep the typed album name instead of the closest match.
+the same destination folder. The dropdown keeps the typed album name as the
+first selected option, then lists matching existing places. Use Up/Down to move
+through suggestions; Enter saves whatever is currently in the textbox.
 Each reviewed location becomes context for the next model prompt, with the most
 recent country/region treated as the active trip context.
 
