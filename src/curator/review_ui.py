@@ -1240,6 +1240,11 @@ HTML = """<!doctype html>
       figure.addEventListener('keydown', (event) => {
         if (isSpaceKey(event)) {
           event.preventDefault();
+          event.stopPropagation();
+          if (expandedView) {
+            closeExpandedImage(true);
+            return;
+          }
           selectImage(index, figure);
           openExpandedImage(image, figure);
         }
@@ -1860,6 +1865,11 @@ HTML = """<!doctype html>
         if (suggestions) suggestions.hidden = true;
         activeSuggestion = null;
         activeSuggestionIndex = -1;
+      }
+      if (isSpaceKey(event) && expandedView && !isTextInputTarget(event.target)) {
+        event.preventDefault();
+        closeExpandedImage(true);
+        return;
       }
       if (isSpaceKey(event) && !isTextInputTarget(event.target) && selectedImageIndex >= 0 && !expandedView) {
         event.preventDefault();

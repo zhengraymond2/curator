@@ -177,6 +177,10 @@ class ReviewUiTests(unittest.TestCase):
         self.assertIn("isSpaceKey(event)", HTML)
         self.assertIn("event.key === 'Escape'", HTML)
 
+    def test_review_html_spacebar_toggles_expanded_preview(self) -> None:
+        self.assertIn("isSpaceKey(event) && expandedView", HTML)
+        self.assertIn("event.stopPropagation()", HTML)
+
     def test_review_html_has_album_progress_bar(self) -> None:
         self.assertIn('id="progress-count"', HTML)
         self.assertIn('id="progress-fill"', HTML)
