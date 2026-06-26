@@ -15,10 +15,9 @@ from curator.cli import (
     VolumeSuggestions,
     classify_volume_suggestions,
     cmd_interactive,
-    configure_path_completion,
     main,
-    path_completer,
     prompt_command_menu,
+    prompt_existing_directory,
     select_command_with_questionary,
 )
 from curator.metadata import CaptureTimestamp
@@ -182,6 +181,26 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 prompt_command_menu(input_func=input, select_func=lambda commands: None)
 
+    def test_existing_directory_prompt_uses_questionary_path(self) -> None:
+        case = unique_case_dir("cli-questionary-path")
+        folder = case / "Source"
+        folder.mkdir(parents=True)
+
+        with patch("curator.cli.select_directory_with_questionary", return_value=str(folder)) as select:
+            selected = prompt_existing_directory("Source folder", suggestion=folder, input_func=input)
+
+        self.assertEqual(selected, folder.resolve())
+        select.assert_called_once_with("Source folder", suggestion=folder)
+
+    def test_existing_directory_prompt_cancels_when_questionary_path_returns_none(self) -> None:
+        case = unique_case_dir("cli-questionary-path-cancel")
+        folder = case / "Source"
+        folder.mkdir(parents=True)
+
+        with patch("curator.cli.select_directory_with_questionary", return_value=None):
+            with self.assertRaises(KeyboardInterrupt):
+                prompt_existing_directory("Source folder", suggestion=folder, input_func=input)
+
     def test_interactive_dedupe_builds_plan_from_menu_selection(self) -> None:
         case = unique_case_dir("cli-interactive-dedupe")
         root = case / "root"
@@ -241,41 +260,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(suggestions.destinations, (destination,))
         self.assertEqual(suggestions.source_hint, source.path)
         self.assertEqual(suggestions.destination_hint, destination.path)
-
-    def test_path_completion_binds_tab_for_libedit(self) -> None:
-        class FakeReadline:
-            __doc__ = "libedit readline compatibility"
-
-            def __init__(self) -> None:
-                self.completer = None
-                self.delims = ""
-                self.bindings: list[str] = []
-
-            def set_completer(self, completer) -> None:
-                self.completer = completer
-
-            def set_completer_delims(self, delims: str) -> None:
-                self.delims = delims
-
-            def parse_and_bind(self, binding: str) -> None:
-                self.bindings.append(binding)
-
-        fake = FakeReadline()
-
-        configure_path_completion(fake)
-
-        self.assertIs(fake.completer, path_completer)
-        self.assertNotIn(" ", fake.delims)
-        self.assertEqual(fake.bindings, ["bind ^I rl_complete"])
-
-    def test_path_completer_keeps_directory_names_with_spaces(self) -> None:
-        case = unique_case_dir("cli-path-complete")
-        folder = case / "LaCie 1"
-        folder.mkdir()
-
-        completion = path_completer(str(case / "La"), 0)
-
-        self.assertEqual(completion, str(folder) + "/")
 
     def test_organize_reports_metadata_progress(self) -> None:
         case = unique_case_dir("cli-metadata-progress")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import shutil
@@ -141,6 +140,12 @@ INTERACTIVE_COMMAND_DESCRIPTIONS = {
 }
 COMMAND_DESCRIPTION_STYLE = "fg:#8a8a8a"
 CLI_TITLE = "===  CURATOR ==="
+PATH_COMPLETION_STYLE = [
+    ("completion-menu.completion", "fg:#8a8a8a"),
+    ("completion-menu.completion.current", "fg:#e4e4e4 bg:#444444"),
+    ("completion-menu.meta.completion", "fg:#8a8a8a"),
+    ("completion-menu.meta.completion.current", "fg:#e4e4e4 bg:#444444"),
+]
 
 
 @dataclass(frozen=True)
@@ -333,7 +338,11 @@ def resolve_command_selection(selected: str | None) -> str:
 def prompt_dedupe_roots(*, input_func: Callable[[str], str]) -> list[Path]:
     roots = [prompt_existing_directory("Root folder", suggestion=None, input_func=input_func)]
     while True:
-        entered = input_path("Additional root folder [Enter to continue]: ", input_func=input_func).strip()
+        entered = input_directory_path(
+            "Additional root folder [Enter to continue]",
+            suggestion=None,
+            input_func=input_func,
+        ).strip()
         if not entered:
             return roots
         path = Path(entered).expanduser().resolve()
@@ -387,11 +396,41 @@ def prompt_directory_path(
 
 
 def input_directory_path(label: str, *, suggestion: Path | None, input_func: Callable[[str], str]) -> str:
+    if input_func is input:
+        selected = select_directory_with_questionary(label, suggestion=suggestion)
+        if selected is None:
+            raise KeyboardInterrupt
+        return selected
+
+    return input_func(format_directory_prompt(label, suggestion=suggestion))
+
+
+def format_directory_prompt(label: str, *, suggestion: Path | None) -> str:
     prompt = f"{label}"
     if suggestion is not None:
         prompt += f" {GREY}[{suggestion}]{RESET}"
     prompt += ": "
-    return input_path(prompt, input_func=input_func)
+    return prompt
+
+
+def select_directory_with_questionary(label: str, *, suggestion: Path | None) -> str | None:
+    try:
+        import questionary
+        from prompt_toolkit.shortcuts import CompleteStyle
+    except ImportError as exc:
+        raise RuntimeError("interactive path selection requires questionary; run `make` to update the environment") from exc
+
+    return questionary.path(
+        label,
+        default=str(suggestion) if suggestion is not None else "",
+        qmark="",
+        only_directories=True,
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        style=questionary.Style(PATH_COMPLETION_STYLE),
+        complete_while_typing=True,
+        erase_when_done=True,
+        reserve_space_for_menu=8,
+    ).ask()
 
 
 def prompt_yes_no(label: str, *, default: bool, input_func: Callable[[str], str]) -> bool:
@@ -413,72 +452,12 @@ def prompt_existing_directory(
     suggestion: Path | None,
     input_func: Callable[[str], str],
 ) -> Path:
-    while True:
-        prompt = f"{label}"
-        if suggestion is not None:
-            prompt += f" {GREY}[{suggestion}]{RESET}"
-        prompt += ": "
-        entered = input_path(prompt, input_func=input_func).strip()
-        if not entered and suggestion is not None:
-            path = suggestion
-        elif entered:
-            path = Path(entered).expanduser()
-        else:
-            print(f"{label} is required.")
-            continue
-
-        path = path.expanduser().resolve()
-        if path.is_dir():
-            return path
-        print(f"Folder does not exist: {path}")
-
-
-def input_path(prompt: str, *, input_func: Callable[[str], str]) -> str:
-    if input_func is not input or not sys.stdin.isatty():
-        return input_func(prompt)
-    try:
-        import readline
-    except ImportError:
-        return input_func(prompt)
-
-    old_completer = readline.get_completer()
-    old_delims = readline.get_completer_delims()
-    configure_path_completion(readline)
-    try:
-        return input_func(prompt)
-    finally:
-        readline.set_completer(old_completer)
-        readline.set_completer_delims(old_delims)
-
-
-def configure_path_completion(readline_module: object) -> None:
-    readline_module.set_completer(path_completer)
-    readline_module.set_completer_delims("\n")
-    if "libedit" in (getattr(readline_module, "__doc__", "") or "").casefold():
-        readline_module.parse_and_bind("bind ^I rl_complete")
-    else:
-        readline_module.parse_and_bind("tab: complete")
-
-
-def path_completer(text: str, state: int) -> str | None:
-    expanded = os.path.expanduser(text) if text else ""
-    matches = sorted(glob.glob(expanded + "*"))
-    options = [format_completion(match, original=text) for match in matches]
-    return options[state] if state < len(options) else None
-
-
-def format_completion(match: str, *, original: str) -> str:
-    path = Path(match)
-    completed = str(path)
-    if original.startswith("~"):
-        home = str(Path.home())
-        if completed == home:
-            completed = "~"
-        elif completed.startswith(home + os.sep):
-            completed = "~" + completed[len(home) :]
-    if path.is_dir():
-        completed += os.sep
-    return completed
+    return prompt_directory_path(
+        label,
+        suggestion=suggestion,
+        input_func=input_func,
+        must_exist=True,
+    )
 
 
 def create_export_destination(destination_root: Path, now: datetime) -> Path:
