@@ -98,19 +98,19 @@ returns an unknown location. Close the gallery with Esc, then enter `Country/Pla
 or a place name in the CLI.
 
 Add `--review-ui` to open a local browser review flow for every place-identified
-bundle. Curator starts the model request in the background as soon as the sampled
-images for the current bundle are prepared, then shows the gallery and location
-textbox without waiting for the model result. While the in-memory `llm_data` for
-that bundle is still empty, the model fields show a loading spinner; when the
-result arrives, the UI fills in the model guess, confidence, rationale, and
-evidence. Press Enter or click `Save / Continue` to advance. The location
-textbox accepts `Country/Place` or a place name, and suggests previously entered
-places with case-insensitive fuzzy matching; selecting an existing place reuses
-the same destination folder. The dropdown keeps the typed album name as the
-first selected option, then lists matching existing places. Use Up/Down to move
-through suggestions; Enter saves whatever is currently in the textbox.
-Each reviewed location becomes context for the next model prompt, with the most
-recent country/region treated as the active trip context.
+bundle. Curator opens the UI with lightweight pending review items, then prepares
+sampled images for every bundle in the background. As each sampled set is ready,
+Curator starts that bundle's LLM request and stores the in-memory result as
+`llm_data`. The UI stays usable while `llm_data` or the full gallery is still
+pending: model fields show a loading spinner until `llm_data` arrives, and
+images are served through `/api/image` so `/api/state` remains small. Press Enter
+or click `Save / Continue` to advance even while model data or gallery images
+are loading. The location textbox accepts `Country/Place` or a place name, and
+suggests previously entered places with case-insensitive fuzzy matching;
+selecting an existing place reuses the same destination folder. The dropdown
+keeps the typed album name as the first selected option, then lists matching
+existing places. Use Up/Down to move through suggestions; Enter saves whatever
+is currently in the textbox.
 
 The prompt is checked in at `src/curator/prompts/prompt_001_identify_place.txt` and tells
 the model to use an `unknown XYZ` fallback when the location evidence is weak.

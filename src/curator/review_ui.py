@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import threading
 import webbrowser
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from .place_identification import PlaceIdentification, PreparedImage
 
@@ -29,6 +32,10 @@ class ReviewItem:
     suggestions: tuple[LocationSuggestion, ...] = ()
     context_summary: str = ""
     llm_pending: bool = False
+    images_pending: bool = False
+
+
+ImageUrlBuilder = Callable[[str, int, int], str]
 
 
 @dataclass(frozen=True)
@@ -46,43 +53,71 @@ class FinalReviewResult:
 class ReviewState:
     def __init__(self, items: Sequence[ReviewItem]) -> None:
         self.items = list(items)
+        self.items_by_group_id = {item.identification.group_id: item for item in self.items}
         self.index = 0
         self.decisions: dict[str, PlaceIdentification] = {}
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
+        self.image_data: dict[str, tuple[PreparedImage, ...]] = {}
+        self.image_errors: dict[str, str] = {}
+        self.image_loading: set[str] = {
+            item.identification.group_id for item in self.items if item.images_pending
+        }
+        self.image_versions: dict[str, int] = {}
+        self.accepted_suggestions: list[LocationSuggestion] = []
         self.reviewed: list[ReviewedAlbum] = []
         self.image_locations: dict[str, PlaceIdentification] = {}
         self.final_ready = False
         self.done = threading.Event()
         self.lock = threading.Lock()
 
-    def payload(self) -> Mapping[str, object]:
+    def payload(self, image_url_builder: ImageUrlBuilder | None = None) -> Mapping[str, object]:
         with self.lock:
             if self.final_ready:
-                return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
+                return final_review_payload(
+                    self.reviewed,
+                    self.image_locations,
+                    self.index,
+                    len(self.items),
+                    image_url_builder=image_url_builder,
+                    image_versions=self.image_versions,
+                    images_loading=self.image_loading,
+                )
             if self.index >= len(self.items):
                 return {"done": True, "index": self.index, "total": len(self.items)}
+            item = self.item_with_current_context(self.items[self.index])
             return review_item_payload(
-                self.items[self.index],
+                item,
                 self.index,
                 len(self.items),
                 llm_data=self.llm_data,
                 llm_errors=self.llm_errors,
+                image_data=self.image_data,
+                image_errors=self.image_errors,
+                image_loading=self.image_loading,
+                image_versions=self.image_versions,
+                image_url_builder=image_url_builder,
             )
 
-    def decide(self, country_or_region: str | None, place_name: str | None) -> Mapping[str, object]:
+    def decide(
+        self,
+        country_or_region: str | None,
+        place_name: str | None,
+        image_url_builder: ImageUrlBuilder | None = None,
+    ) -> Mapping[str, object]:
         with self.lock:
             if self.index >= len(self.items):
                 self.done.set()
                 return {"done": True}
 
-            item = self.items[self.index]
+            item = self.item_with_current_context(self.items[self.index])
             original = self.llm_data.get(item.identification.group_id, item.identification)
+            suggestions = [*item.suggestions, *self.accepted_suggestions]
             country, place = resolve_location(
                 country_or_region,
                 place_name,
                 original=original,
-                suggestions=item.suggestions,
+                suggestions=suggestions,
             )
             reviewed = replace(
                 original,
@@ -95,16 +130,31 @@ class ReviewState:
             self.decisions[original.group_id] = reviewed
             self.reviewed.append(ReviewedAlbum(item=item, decision=reviewed))
             set_initial_image_locations(self.image_locations, item, reviewed)
+            add_location_suggestion(self.accepted_suggestions, reviewed)
             self.index += 1
             if self.index >= len(self.items):
                 self.final_ready = True
-                return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
+                return final_review_payload(
+                    self.reviewed,
+                    self.image_locations,
+                    self.index,
+                    len(self.items),
+                    image_url_builder=image_url_builder,
+                    image_versions=self.image_versions,
+                    images_loading=self.image_loading,
+                )
+            item = self.item_with_current_context(self.items[self.index])
             return review_item_payload(
-                self.items[self.index],
+                item,
                 self.index,
                 len(self.items),
                 llm_data=self.llm_data,
                 llm_errors=self.llm_errors,
+                image_data=self.image_data,
+                image_errors=self.image_errors,
+                image_loading=self.image_loading,
+                image_versions=self.image_versions,
+                image_url_builder=image_url_builder,
             )
 
     def store_llm_result(self, identification: PlaceIdentification) -> None:
@@ -116,22 +166,114 @@ class ReviewState:
         with self.lock:
             self.llm_errors[group_id] = str(error)
 
+    def store_images(
+        self,
+        group_id: str,
+        images: Sequence[PreparedImage],
+        *,
+        complete: bool,
+    ) -> None:
+        with self.lock:
+            prepared = tuple(images)
+            self.image_data[group_id] = prepared
+            self.image_errors.pop(group_id, None)
+            if complete:
+                self.image_loading.discard(group_id)
+            else:
+                self.image_loading.add(group_id)
+            self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
+            self.refresh_reviewed_images(group_id, prepared)
+
+    def store_image_error(self, group_id: str, error: Exception) -> None:
+        with self.lock:
+            self.image_errors[group_id] = str(error)
+            self.image_loading.discard(group_id)
+            self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
+
+    def image_url(self, group_id: str, index: int, version: int) -> str:
+        return f"/api/image?{urlencode({'group_id': group_id, 'index': index, 'v': version})}"
+
+    def image_response(self, group_id: str, index: int) -> tuple[bytes, str] | None:
+        with self.lock:
+            images = self.images_for_group(group_id)
+            if index < 0 or index >= len(images):
+                return None
+            return prepared_image_response(images[index])
+
+    def images_for_group(self, group_id: str) -> tuple[PreparedImage, ...]:
+        if group_id in self.image_data:
+            return self.image_data[group_id]
+        item = self.items_by_group_id.get(group_id)
+        return item.prepared_images if item else ()
+
+    def item_with_current_context(self, item: ReviewItem) -> ReviewItem:
+        group_id = item.identification.group_id
+        suggestions = merge_location_suggestions(item.suggestions, self.accepted_suggestions)
+        return replace(
+            item,
+            prepared_images=self.images_for_group(group_id),
+            suggestions=tuple(suggestions),
+            context_summary=review_context_summary(suggestions),
+        )
+
+    def refresh_reviewed_images(self, group_id: str, images: Sequence[PreparedImage]) -> None:
+        for index, reviewed_album in enumerate(self.reviewed):
+            if reviewed_album.decision.group_id != group_id:
+                continue
+            item = replace(reviewed_album.item, prepared_images=tuple(images))
+            self.reviewed[index] = ReviewedAlbum(item=item, decision=reviewed_album.decision)
+            set_initial_image_locations(self.image_locations, item, reviewed_album.decision)
+
+    def final_result(self) -> FinalReviewResult:
+        with self.lock:
+            return FinalReviewResult(
+                decisions=reviewed_decisions(self.reviewed),
+                image_locations=dict(self.image_locations),
+            )
+
     def approve_final_review(self) -> Mapping[str, object]:
         with self.lock:
             self.final_ready = False
             self.done.set()
             return {"done": True, "index": self.index, "total": len(self.items)}
 
-    def rename_album(self, target_key: str, folder_name: str) -> Mapping[str, object]:
+    def rename_album(
+        self,
+        target_key: str,
+        folder_name: str,
+        image_url_builder: ImageUrlBuilder | None = None,
+    ) -> Mapping[str, object]:
         with self.lock:
             rename_reviewed_album(self.reviewed, self.image_locations, target_key, folder_name)
             self.decisions = reviewed_decisions(self.reviewed)
-            return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
+            return final_review_payload(
+                self.reviewed,
+                self.image_locations,
+                self.index,
+                len(self.items),
+                image_url_builder=image_url_builder,
+                image_versions=self.image_versions,
+                images_loading=self.image_loading,
+            )
 
-    def move_images(self, paths: Sequence[str], target_key: str, folder_name: str) -> Mapping[str, object]:
+    def move_images(
+        self,
+        paths: Sequence[str],
+        target_key: str,
+        folder_name: str,
+        image_url_builder: ImageUrlBuilder | None = None,
+    ) -> Mapping[str, object]:
         with self.lock:
             move_reviewed_images(self.image_locations, paths, target_key, folder_name)
-            return final_review_payload(self.reviewed, self.image_locations, self.index, len(self.items))
+            return final_review_payload(
+                self.reviewed,
+                self.image_locations,
+                self.index,
+                len(self.items),
+                image_url_builder=image_url_builder,
+                image_versions=self.image_versions,
+                images_loading=self.image_loading,
+            )
 
 
 def review_place_identifications_in_browser(
@@ -140,9 +282,30 @@ def review_place_identifications_in_browser(
     host: str = "127.0.0.1",
     port: int = 0,
     open_browser: bool = True,
-) -> dict[str, PlaceIdentification]:
+    state_ready: Callable[[ReviewState], None] | None = None,
+) -> FinalReviewResult:
     if not items:
-        return {}
+        return FinalReviewResult(decisions={}, image_locations={})
+
+    return _review_place_identifications_in_browser(
+        items,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        state_ready=state_ready,
+    )
+
+
+def _review_place_identifications_in_browser(
+    items: Sequence[ReviewItem],
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    open_browser: bool = True,
+    state_ready: Callable[[ReviewState], None] | None = None,
+) -> FinalReviewResult:
+    if not items:
+        return FinalReviewResult(decisions={}, image_locations={})
 
     state = ReviewState(items)
     handler = make_handler(state)
@@ -153,6 +316,8 @@ def review_place_identifications_in_browser(
     url = f"http://{actual_host}:{actual_port}/"
 
     try:
+        if state_ready:
+            state_ready(state)
         if open_browser:
             webbrowser.open(url)
         print(f"Review UI: {url}")
@@ -162,7 +327,7 @@ def review_place_identifications_in_browser(
         server.server_close()
         thread.join(timeout=5)
 
-    return state.decisions
+    return state.final_result()
 
 
 class BrowserReviewSession:
@@ -210,6 +375,10 @@ class SequentialReviewState:
         self.decision: PlaceIdentification | None = None
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
+        self.image_data: dict[str, tuple[PreparedImage, ...]] = {}
+        self.image_errors: dict[str, str] = {}
+        self.image_loading: set[str] = set()
+        self.image_versions: dict[str, int] = {}
         self.reviewed: list[ReviewedAlbum] = []
         self.image_locations: dict[str, PlaceIdentification] = {}
         self.final_ready = False
@@ -225,6 +394,8 @@ class SequentialReviewState:
             self.current = item
             self.decision = None
             self.item_done.clear()
+            if item.images_pending:
+                self.image_loading.add(item.identification.group_id)
             self.item_ready.set()
         self.item_done.wait()
         with self.lock:
@@ -232,12 +403,20 @@ class SequentialReviewState:
                 raise RuntimeError("review UI closed before a decision was recorded")
             return self.decision
 
-    def payload(self) -> Mapping[str, object]:
+    def payload(self, image_url_builder: ImageUrlBuilder | None = None) -> Mapping[str, object]:
         with self.lock:
             if self.done.is_set():
                 return {"done": True, "index": self.index, "total": self.total}
             if self.final_ready:
-                return final_review_payload(self.reviewed, self.image_locations, self.index, self.total)
+                return final_review_payload(
+                    self.reviewed,
+                    self.image_locations,
+                    self.index,
+                    self.total,
+                    image_url_builder=image_url_builder,
+                    image_versions=self.image_versions,
+                    images_loading=self.image_loading,
+                )
             if self.current is None:
                 return {"loading": True, "done": False, "index": self.index, "total": self.total}
             return review_item_payload(
@@ -246,9 +425,19 @@ class SequentialReviewState:
                 self.total,
                 llm_data=self.llm_data,
                 llm_errors=self.llm_errors,
+                image_data=self.image_data,
+                image_errors=self.image_errors,
+                image_loading=self.image_loading,
+                image_versions=self.image_versions,
+                image_url_builder=image_url_builder,
             )
 
-    def decide(self, country_or_region: str | None, place_name: str | None) -> Mapping[str, object]:
+    def decide(
+        self,
+        country_or_region: str | None,
+        place_name: str | None,
+        image_url_builder: ImageUrlBuilder | None = None,
+    ) -> Mapping[str, object]:
         with self.lock:
             if self.current is None:
                 return {"loading": True, "done": False, "index": self.index, "total": self.total}
@@ -285,6 +474,45 @@ class SequentialReviewState:
         with self.lock:
             self.llm_errors[group_id] = str(error)
 
+    def store_images(
+        self,
+        group_id: str,
+        images: Sequence[PreparedImage],
+        *,
+        complete: bool,
+    ) -> None:
+        with self.lock:
+            self.image_data[group_id] = tuple(images)
+            self.image_errors.pop(group_id, None)
+            if complete:
+                self.image_loading.discard(group_id)
+            else:
+                self.image_loading.add(group_id)
+            self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
+
+    def store_image_error(self, group_id: str, error: Exception) -> None:
+        with self.lock:
+            self.image_errors[group_id] = str(error)
+            self.image_loading.discard(group_id)
+            self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
+
+    def image_url(self, group_id: str, index: int, version: int) -> str:
+        return f"/api/image?{urlencode({'group_id': group_id, 'index': index, 'v': version})}"
+
+    def image_response(self, group_id: str, index: int) -> tuple[bytes, str] | None:
+        with self.lock:
+            images = self.images_for_group(group_id)
+            if index < 0 or index >= len(images):
+                return None
+            return prepared_image_response(images[index])
+
+    def images_for_group(self, group_id: str) -> tuple[PreparedImage, ...]:
+        if group_id in self.image_data:
+            return self.image_data[group_id]
+        if self.current and self.current.identification.group_id == group_id:
+            return self.current.prepared_images
+        return ()
+
     def finalize(self) -> FinalReviewResult:
         with self.lock:
             self.current = None
@@ -307,15 +535,42 @@ class SequentialReviewState:
             self.item_done.set()
             return {"done": True, "index": self.index, "total": self.total}
 
-    def rename_album(self, target_key: str, folder_name: str) -> Mapping[str, object]:
+    def rename_album(
+        self,
+        target_key: str,
+        folder_name: str,
+        image_url_builder: ImageUrlBuilder | None = None,
+    ) -> Mapping[str, object]:
         with self.lock:
             rename_reviewed_album(self.reviewed, self.image_locations, target_key, folder_name)
-            return final_review_payload(self.reviewed, self.image_locations, self.index, self.total)
+            return final_review_payload(
+                self.reviewed,
+                self.image_locations,
+                self.index,
+                self.total,
+                image_url_builder=image_url_builder,
+                image_versions=self.image_versions,
+                images_loading=self.image_loading,
+            )
 
-    def move_images(self, paths: Sequence[str], target_key: str, folder_name: str) -> Mapping[str, object]:
+    def move_images(
+        self,
+        paths: Sequence[str],
+        target_key: str,
+        folder_name: str,
+        image_url_builder: ImageUrlBuilder | None = None,
+    ) -> Mapping[str, object]:
         with self.lock:
             move_reviewed_images(self.image_locations, paths, target_key, folder_name)
-            return final_review_payload(self.reviewed, self.image_locations, self.index, self.total)
+            return final_review_payload(
+                self.reviewed,
+                self.image_locations,
+                self.index,
+                self.total,
+                image_url_builder=image_url_builder,
+                image_versions=self.image_versions,
+                images_loading=self.image_loading,
+            )
 
     def finish(self) -> None:
         with self.lock:
@@ -334,13 +589,28 @@ def review_item_payload(
     *,
     llm_data: Mapping[str, PlaceIdentification] | None = None,
     llm_errors: Mapping[str, str] | None = None,
+    image_data: Mapping[str, tuple[PreparedImage, ...]] | None = None,
+    image_errors: Mapping[str, str] | None = None,
+    image_loading: set[str] | None = None,
+    image_versions: Mapping[str, int] | None = None,
+    image_url_builder: ImageUrlBuilder | None = None,
 ) -> Mapping[str, object]:
     group_id = item.identification.group_id
     llm_data = llm_data or {}
     llm_errors = llm_errors or {}
+    image_data = image_data or {}
+    image_errors = image_errors or {}
+    image_loading = image_loading or set()
+    image_versions = image_versions or {}
     identification = llm_data.get(group_id, item.identification)
     llm_loading = item.llm_pending and group_id not in llm_data and group_id not in llm_errors
     llm_error = llm_errors.get(group_id, "")
+    images = image_data.get(group_id, item.prepared_images)
+    images_loading = item.images_pending and group_id not in image_errors and (
+        group_id not in image_data or group_id in image_loading
+    )
+    image_error = image_errors.get(group_id, "")
+    image_version = image_versions.get(group_id, 0)
     return {
         "done": False,
         "index": index,
@@ -355,6 +625,9 @@ def review_item_payload(
         "alternate_guesses": [] if llm_loading else list(identification.alternate_guesses),
         "llm_loading": llm_loading,
         "llm_error": llm_error,
+        "images_loading": images_loading,
+        "image_error": image_error,
+        "images_version": image_version,
         "file_count": item.file_count,
         "context_summary": item.context_summary,
         "suggestions": [
@@ -367,13 +640,15 @@ def review_item_payload(
         ],
         "images": [
             {
-                "src": image.data_url,
+                "src": image_url_builder(group_id, image_index, image_version)
+                if image_url_builder
+                else image.data_url,
                 "filename": image.source_path.name,
                 "path": str(image.source_path),
                 "prepared_size": image.prepared_size,
                 "encoded_bytes": image.encoded_bytes,
             }
-            for image in item.prepared_images
+            for image_index, image in enumerate(images)
         ],
     }
 
@@ -383,10 +658,17 @@ def final_review_payload(
     image_locations: Mapping[str, PlaceIdentification],
     index: int,
     total: int,
+    *,
+    image_url_builder: ImageUrlBuilder | None = None,
+    image_versions: Mapping[str, int] | None = None,
+    images_loading: set[str] | None = None,
 ) -> Mapping[str, object]:
     albums: dict[tuple[str, str], dict[str, object]] = {}
+    image_versions = image_versions or {}
     for reviewed_album in reviewed:
-        for image in reviewed_album.item.prepared_images:
+        group_id = reviewed_album.item.identification.group_id
+        image_version = image_versions.get(group_id, 0)
+        for image_index, image in enumerate(reviewed_album.item.prepared_images):
             image_path = str(image.source_path)
             decision = image_locations.get(image_path, reviewed_album.decision)
             key = (decision.country_or_region, decision.place_name)
@@ -403,7 +685,9 @@ def final_review_payload(
             assert isinstance(images, list)
             images.append(
                 {
-                    "src": image.data_url,
+                    "src": image_url_builder(group_id, image_index, image_version)
+                    if image_url_builder
+                    else image.data_url,
                     "filename": image.source_path.name,
                     "path": image_path,
                     "group_id": decision.group_id,
@@ -417,6 +701,7 @@ def final_review_payload(
         "final_review": True,
         "index": index,
         "total": total,
+        "images_loading": bool(images_loading),
         "albums": list(albums.values()),
     }
 
@@ -431,7 +716,7 @@ def set_initial_image_locations(
     decision: PlaceIdentification,
 ) -> None:
     for image in item.prepared_images:
-        image_locations[str(image.source_path)] = decision
+        image_locations.setdefault(str(image.source_path), decision)
 
 
 def rename_reviewed_album(
@@ -564,14 +849,86 @@ def normalize_text(value: str) -> str:
     return " ".join(value.strip().casefold().split())
 
 
+def add_location_suggestion(
+    suggestions: list[LocationSuggestion],
+    identification: PlaceIdentification,
+) -> None:
+    country = identification.country_or_region.strip()
+    place = identification.place_name.strip()
+    if not country or not place:
+        return
+    normalized = (country.casefold(), place.casefold())
+    for existing in suggestions:
+        if (existing.country_or_region.casefold(), existing.place_name.casefold()) == normalized:
+            return
+    suggestions.append(LocationSuggestion(country, place))
+
+
+def merge_location_suggestions(
+    base: Sequence[LocationSuggestion],
+    accepted: Sequence[LocationSuggestion],
+) -> list[LocationSuggestion]:
+    merged: list[LocationSuggestion] = []
+    for suggestion in [*base, *accepted]:
+        normalized = (suggestion.country_or_region.casefold(), suggestion.place_name.casefold())
+        if any(
+            (existing.country_or_region.casefold(), existing.place_name.casefold()) == normalized
+            for existing in merged
+        ):
+            continue
+        merged.append(suggestion)
+    return merged
+
+
+def review_context_summary(suggestions: Sequence[LocationSuggestion]) -> str:
+    if not suggestions:
+        return "No reviewed locations yet."
+    active_country = suggestions[-1].country_or_region
+    active = [suggestion.place_name for suggestion in suggestions if suggestion.country_or_region == active_country]
+    return f"Active context: {active_country} / {', '.join(active[-8:])}"
+
+
+def prepared_image_response(image: PreparedImage) -> tuple[bytes, str] | None:
+    if "," not in image.data_url:
+        return None
+    header, encoded = image.data_url.split(",", 1)
+    content_type = "image/jpeg"
+    if header.startswith("data:") and ";" in header:
+        content_type = header.removeprefix("data:").split(";", 1)[0] or content_type
+    try:
+        return base64.b64decode(encoded), content_type
+    except (ValueError, binascii.Error):
+        return None
+
+
 def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
     class ReviewHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/" or self.path.startswith("/?"):
+            parsed = urlparse(self.path)
+            if parsed.path == "/" or self.path.startswith("/?"):
                 self.send_text(HTML, content_type="text/html")
                 return
-            if self.path == "/api/state":
-                self.send_json(state.payload())
+            if parsed.path == "/api/state":
+                self.send_json(state.payload(image_url_builder=state.image_url))
+                return
+            if parsed.path == "/api/image":
+                query = parse_qs(parsed.query)
+                group_id = (query.get("group_id") or [""])[0]
+                try:
+                    index = int((query.get("index") or ["-1"])[0])
+                except ValueError:
+                    self.send_error(400, "invalid image index")
+                    return
+                response = state.image_response(group_id, index)
+                if response is None:
+                    self.send_error(404)
+                    return
+                body, content_type = response
+                self.send_bytes(
+                    body,
+                    content_type=content_type,
+                    cache_control="private, max-age=31536000",
+                )
                 return
             self.send_error(404)
 
@@ -596,6 +953,7 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
                     state.rename_album(
                         str(payload.get("album_key") or ""),
                         str(payload.get("place_name") or ""),
+                        image_url_builder=state.image_url,
                     )
                 )
                 return
@@ -607,6 +965,7 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
                         paths,
                         str(payload.get("album_key") or ""),
                         str(payload.get("place_name") or ""),
+                        image_url_builder=state.image_url,
                     )
                 )
                 return
@@ -614,6 +973,7 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
                 state.decide(
                     str(payload.get("country_or_region") or ""),
                     str(payload.get("place_name") or ""),
+                    image_url_builder=state.image_url,
                 )
             )
 
@@ -623,13 +983,31 @@ def make_handler(state: ReviewState) -> type[BaseHTTPRequestHandler]:
         def send_json(self, payload: Mapping[str, object]) -> None:
             self.send_text(json.dumps(payload).encode("utf-8"), content_type="application/json")
 
-        def send_text(self, body: str | bytes, *, content_type: str) -> None:
+        def send_text(
+            self,
+            body: str | bytes,
+            *,
+            content_type: str,
+            cache_control: str = "no-store",
+        ) -> None:
             encoded = body.encode("utf-8") if isinstance(body, str) else body
+            self.send_bytes(encoded, content_type=content_type, cache_control=cache_control)
+
+        def send_bytes(
+            self,
+            body: bytes,
+            *,
+            content_type: str,
+            cache_control: str = "no-store",
+        ) -> None:
             self.send_response(200)
-            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-            self.send_header("Content-Length", str(len(encoded)))
+            if content_type.startswith("text/") or content_type == "application/json":
+                content_type = f"{content_type}; charset=utf-8"
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(encoded)
+            self.wfile.write(body)
 
     return ReviewHandler
 
@@ -1006,6 +1384,11 @@ HTML = """<!doctype html>
       border-radius: 8px;
       color: var(--muted);
     }
+    .gallery .loading {
+      grid-column: 1 / -1;
+      max-width: none;
+      margin: 0;
+    }
     .inline-loading {
       display: inline-flex;
       align-items: center;
@@ -1073,6 +1456,7 @@ HTML = """<!doctype html>
     let suggestionOptions = [];
     let activeSuggestionIndex = -1;
     let lastGroupId = null;
+    let lastImagesVersion = null;
     let placeDirty = false;
     let galleryObserver = null;
     let galleryRenderedCount = 0;
@@ -1108,12 +1492,16 @@ HTML = """<!doctype html>
       }
       if (current.final_review) {
         renderFinalReview();
+        if (current.images_loading) {
+          setTimeout(loadState, 900);
+        }
         return;
       }
       if (current.loading) {
         closeExpandedImage(false);
         resetGalleryObserver();
         lastGroupId = null;
+        lastImagesVersion = null;
         placeDirty = false;
         resetSuggestionState();
         updateProgress();
@@ -1133,8 +1521,13 @@ HTML = """<!doctype html>
         closeExpandedImage(false);
         resetGalleryObserver();
         lastGroupId = current.group_id;
+        lastImagesVersion = null;
         placeDirty = false;
         resetSuggestionState();
+      }
+      const imageVersionChanged = current.images_version !== lastImagesVersion;
+      if (imageVersionChanged) {
+        lastImagesVersion = current.images_version;
       }
       updateProgress();
       const placeInput = document.getElementById('place');
@@ -1160,13 +1553,15 @@ HTML = """<!doctype html>
       renderList('evidence', current.visual_evidence);
       renderList('alternates', current.alternate_guesses);
 
-      if (groupChanged) {
+      if (groupChanged || imageVersionChanged || current.images_loading) {
         renderGallery();
+      }
+      if (groupChanged) {
         placeInput.focus();
         placeInput.select();
       }
       renderSuggestions();
-      if (current.llm_loading) {
+      if (current.llm_loading || current.images_loading) {
         setTimeout(loadState, 900);
       }
     }
@@ -1202,6 +1597,7 @@ HTML = """<!doctype html>
       galleryRenderedCount = 0;
       selectedImageIndex = -1;
       appendGalleryPage();
+      renderGalleryStatus();
     }
 
     function appendGalleryPage() {
@@ -1227,6 +1623,24 @@ HTML = """<!doctype html>
           if (entries.some((entry) => entry.isIntersecting)) appendGalleryPage();
         });
         galleryObserver.observe(sentinel);
+      }
+    }
+
+    function renderGalleryStatus() {
+      const gallery = document.getElementById('gallery');
+      if (!gallery || !current) return;
+      const previous = gallery.querySelector('.gallery-loading');
+      if (previous) previous.remove();
+      if (current.images_loading) {
+        const loading = document.createElement('div');
+        loading.className = 'loading gallery-loading';
+        loading.innerHTML = '<span class="inline-loading"><span class="spinner" aria-hidden="true"></span><span>Loading images...</span></span>';
+        gallery.appendChild(loading);
+      } else if (current.image_error && !(current.images || []).length) {
+        const error = document.createElement('div');
+        error.className = 'loading gallery-loading';
+        error.textContent = current.image_error;
+        gallery.appendChild(error);
       }
     }
 

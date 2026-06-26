@@ -28,7 +28,7 @@ from .place_identification import (
 )
 from .plan import Operation, Plan, make_plan, new_run_id
 from .progress import ProgressReporter
-from .review_ui import BrowserReviewSession, FinalReviewResult, LocationSuggestion, ReviewItem, SequentialReviewState
+from .review_ui import FinalReviewResult, ReviewItem, ReviewState, review_place_identifications_in_browser
 from .scan import MediaFile, scan_media
 
 SHOOT_GAP_SECONDS = 60 * 60
@@ -56,6 +56,12 @@ class MediaBundle:
     source_parent: Path
     fallback_name: str
     media: tuple[MediaFile, ...]
+
+
+@dataclass(frozen=True)
+class ReviewAssetJob:
+    bundle: MediaBundle
+    photos: tuple[PhotoCandidate, ...]
 
 
 UnknownPlaceReviewer = Callable[[PlaceIdentification, Sequence[PreparedImage]], PlaceIdentification]
@@ -380,61 +386,42 @@ def identify_bundle_places_with_review_ui(
         max_side=max(256, DEFAULT_MAX_IMAGE_SIDE // 2),
         jpeg_quality=max(1, min(95, DEFAULT_JPEG_QUALITY)),
     )
-    results: dict[str, PlaceIdentification] = {}
-    accepted: list[LocationSuggestion] = []
     base_prompt = load_place_identification_prompt()
+    jobs: list[ReviewAssetJob] = []
+    items: list[ReviewItem] = []
 
-    progress.log(f"Opening browser review UI for {len(bundles)} bundle(s)")
-    with BrowserReviewSession(total=len(bundles)) as session:
-        for index, bundle in enumerate(bundles):
-            photos = place_photo_candidates(bundle, timestamps)
-            if not photos:
-                continue
-            try:
-                with progress.step(
-                    f"Preparing browser review item {index + 1}/{len(bundles)} ({bundle.group_id})",
-                    done=lambda bundle=bundle: f"Prepared browser review item for {bundle.group_id}",
-                    debug=True,
-                ):
-                    samples = select_place_identification_samples(photos)
-                    prepared_samples = [model_preprocessor.prepare(photo) for photo in samples]
-                    prompt = place_prompt_with_context(base_prompt, accepted)
-                    start_llm_identification(
-                        session.state,
-                        identifier=identifier,
-                        group_id=bundle.group_id,
-                        prepared_images=tuple(prepared_samples),
-                        prompt=prompt,
-                        progress=progress,
-                    )
-                    gallery_images = prepare_gallery_images(photos, gallery_preprocessor)
-            except ImagePreparationError:
-                progress.log(f"Skipped browser review item for {bundle.group_id}; image preparation failed")
-                continue
-
-            progress.log(f"Waiting for browser review {index + 1}/{len(bundles)} ({bundle.group_id})", debug=True)
-            reviewed = session.review(
-                ReviewItem(
-                    identification=pending_place_identification(bundle, prepared_samples),
-                    prepared_images=tuple(gallery_images or prepared_samples),
-                    file_count=len(bundle.media),
-                    suggestions=tuple(accepted),
-                    context_summary=active_context_summary(accepted),
-                    llm_pending=True,
-                ),
-                index=index,
+    for bundle in bundles:
+        photos = tuple(place_photo_candidates(bundle, timestamps))
+        if not photos:
+            continue
+        jobs.append(ReviewAssetJob(bundle=bundle, photos=photos))
+        items.append(
+            ReviewItem(
+                identification=pending_place_identification(bundle),
+                prepared_images=(),
+                file_count=len(bundle.media),
+                llm_pending=True,
+                images_pending=True,
             )
-            results[bundle.group_id] = reviewed
-            add_location_suggestion(accepted, reviewed)
-            progress.log(
-                f"Accepted location for {bundle.group_id}: {reviewed.country_or_region} / {reviewed.place_name}",
-                debug=True,
-            )
+        )
 
-        progress.log("Waiting for final browser review approval")
-        final_review = session.finalize()
+    if not items:
+        return FinalReviewResult(decisions={}, image_locations={})
 
-    return final_review
+    progress.log(f"Opening browser review UI for {len(items)} bundle(s)")
+
+    def start_background_work(state: ReviewState) -> None:
+        start_review_asset_preparation(
+            state,
+            jobs=tuple(jobs),
+            identifier=identifier,
+            model_preprocessor=model_preprocessor,
+            gallery_preprocessor=gallery_preprocessor,
+            prompt=base_prompt,
+            progress=progress,
+        )
+
+    return review_place_identifications_in_browser(items, state_ready=start_background_work)
 
 
 def place_photo_candidates(bundle: MediaBundle, timestamps: Mapping[Path, object]) -> list[PhotoCandidate]:
@@ -466,8 +453,60 @@ def prepare_gallery_images(
     return prepared
 
 
+def start_review_asset_preparation(
+    state: ReviewState,
+    *,
+    jobs: Sequence[ReviewAssetJob],
+    identifier: OpenRouterPlaceIdentifier,
+    model_preprocessor: ImagePreprocessor,
+    gallery_preprocessor: ImagePreprocessor,
+    prompt: str,
+    progress: ProgressReporter,
+) -> threading.Thread:
+    def prepare_assets() -> None:
+        prepared_samples_by_group: dict[str, tuple[PreparedImage, ...]] = {}
+
+        for job in jobs:
+            bundle = job.bundle
+            try:
+                samples = select_place_identification_samples(job.photos)
+                prepared_samples = tuple(model_preprocessor.prepare(photo) for photo in samples)
+            except ImagePreparationError as exc:
+                state.store_image_error(bundle.group_id, exc)
+                state.store_llm_error(bundle.group_id, exc)
+                progress.log(f"Skipped browser review assets for {bundle.group_id}; image preparation failed")
+                continue
+
+            prepared_samples_by_group[bundle.group_id] = prepared_samples
+            state.store_images(bundle.group_id, prepared_samples, complete=False)
+            start_llm_identification(
+                state,
+                identifier=identifier,
+                group_id=bundle.group_id,
+                prepared_images=prepared_samples,
+                prompt=prompt,
+                progress=progress,
+            )
+
+        for job in jobs:
+            bundle = job.bundle
+            prepared_samples = prepared_samples_by_group.get(bundle.group_id, ())
+            if not prepared_samples:
+                continue
+            gallery_images = prepare_gallery_images(job.photos, gallery_preprocessor)
+            state.store_images(bundle.group_id, tuple(gallery_images or prepared_samples), complete=True)
+
+    thread = threading.Thread(
+        target=prepare_assets,
+        name="curator-review-assets",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def start_llm_identification(
-    state: SequentialReviewState,
+    state: ReviewState,
     *,
     identifier: OpenRouterPlaceIdentifier,
     group_id: str,
@@ -497,7 +536,7 @@ def start_llm_identification(
 
 def pending_place_identification(
     bundle: MediaBundle,
-    prepared_samples: Sequence[PreparedImage],
+    prepared_samples: Sequence[PreparedImage] = (),
 ) -> PlaceIdentification:
     return PlaceIdentification(
         group_id=bundle.group_id,
@@ -510,57 +549,6 @@ def pending_place_identification(
         alternate_guesses=(),
         sampled_paths=tuple(image.source_path for image in prepared_samples),
         raw_response={},
-    )
-
-
-def add_location_suggestion(
-    suggestions: list[LocationSuggestion],
-    identification: PlaceIdentification,
-) -> None:
-    country = identification.country_or_region.strip()
-    place = identification.place_name.strip()
-    if not country or not place:
-        return
-    candidate = LocationSuggestion(country, place)
-    normalized = (country.casefold(), place.casefold())
-    for existing in suggestions:
-        if (existing.country_or_region.casefold(), existing.place_name.casefold()) == normalized:
-            return
-    suggestions.append(candidate)
-
-
-def active_context_summary(suggestions: Sequence[LocationSuggestion]) -> str:
-    if not suggestions:
-        return "No reviewed locations yet."
-    active_country = suggestions[-1].country_or_region
-    active = [suggestion.place_name for suggestion in suggestions if suggestion.country_or_region == active_country]
-    return f"Active context: {active_country} / {', '.join(active[-8:])}"
-
-
-def place_prompt_with_context(base_prompt: str, suggestions: Sequence[LocationSuggestion]) -> str:
-    if not suggestions:
-        return base_prompt
-
-    active_country = suggestions[-1].country_or_region
-    active_places = [suggestion.place_name for suggestion in suggestions if suggestion.country_or_region == active_country]
-    history = "\n".join(
-        f"- {index + 1}. {suggestion.country_or_region} / {suggestion.place_name}"
-        for index, suggestion in enumerate(suggestions[-20:])
-    )
-    active = "\n".join(f"- {place}" for place in active_places[-12:])
-
-    return (
-        f"{base_prompt}\n\n"
-        "Previously reviewed album locations, in processing order:\n"
-        f"{history}\n\n"
-        f"Current active country/region from the most recent user-reviewed album: {active_country}\n"
-        "Recent accepted places in this active country/region:\n"
-        f"{active}\n\n"
-        "Use this history as trip context. Nearby albums are often from the same country or area, "
-        "so if the current images are generic but visually compatible with the active context, prefer "
-        "a plausible location in that active context. However, context can switch: if the current images "
-        "or user-reviewed history indicate a new country/region, do not force the older country/region. "
-        "Country changes should reset which local context is considered most relevant."
     )
 
 

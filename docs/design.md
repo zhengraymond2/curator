@@ -227,12 +227,12 @@ Important options:
 
 `--review-unknown-places` makes unknown model results interactive: Curator opens the sampled images in a macOS Quick Look gallery, the user closes it with Esc, and then enters a corrected location in the CLI.
 
-`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. For each bundle, Curator prepares the sampled images, starts the LLM request in the background, and immediately lets the UI show the location textbox and all prepared images. While that bundle has no in-memory `llm_data`, the model fields show a loading spinner; when `llm_data` arrives, the page shows the model guess, confidence, rationale, and visible evidence. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle even if the model result is still pending. When all bundles are reviewed, Curator writes the requested dry-run file.
+`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. Curator creates lightweight pending review items for all bundles up front, then prepares sampled images for every bundle in the background. As each sampled set is ready, Curator starts that bundle's LLM request and stores the in-memory result as `llm_data`. While a bundle has no `llm_data`, the model fields show a loading spinner; when `llm_data` arrives, the page shows the model guess, confidence, rationale, and visible evidence. Full gallery images are prepared separately and served through `/api/image`, keeping `/api/state` small. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle even if the model result or full gallery is still pending. When all bundles are reviewed, Curator writes the requested dry-run file.
 
 The review UI keeps a list of previously entered places and uses it in two ways:
 
 - The place field offers case-insensitive fuzzy suggestions. The first dropdown item is the typed album name, selected by default, followed by matching existing places. Up/Down moves through the menu and replaces the textbox with the selected item; Enter saves the textbox value. Selecting or exactly retyping an existing place reuses the same destination folder.
-- Each reviewed location is appended to the context for later model prompts. The most recent country/region is treated as the active context, so a user-entered country switch such as `Guatemala` makes later prompts prefer Guatemala context rather than older Costa Rica context.
+- Each reviewed location is appended to the UI context for later bundles. The place field uses those locations as suggestions and the context line reflects the most recent country/region.
 
 Example `DRYRUN.txt`:
 

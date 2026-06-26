@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import threading
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from curator.metadata import CaptureTimestamp
 from curator.organize import build_organize_plan
 from curator.place_identification import OpenRouterError, PlaceIdentification, PreparedImage
-from curator.review_ui import SequentialReviewState, review_item_payload
+from curator.review_ui import FinalReviewResult, ReviewState
 
 from tests.helpers import unique_case_dir
 
@@ -343,30 +342,12 @@ class OrganizeTests(unittest.TestCase):
             def prepare(self, photo):
                 return prepared
 
-        test_case = self
-
-        class FakeBrowserReviewSession:
-            def __init__(self, total):
-                self.total = total
-                self.state = SequentialReviewState(total)
-                self.decisions = {}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return None
-
-            def review(self, item, *, index):
-                self.decisions[reviewed.group_id] = reviewed
-                return reviewed
-
-            def finalize(self):
-                return SimpleNamespace(decisions=self.decisions)
+        def fake_review(items, **kwargs):
+            return FinalReviewResult(decisions={reviewed.group_id: reviewed}, image_locations={})
 
         with patch("curator.organize.capture_timestamps", return_value={media: timestamp}):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
-                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                with patch("curator.organize.review_place_identifications_in_browser", fake_review):
                     plan = build_organize_plan(
                         case / "CRG",
                         library,
@@ -419,43 +400,37 @@ class OrganizeTests(unittest.TestCase):
                     prepared_size=(10, 10),
                 )
 
-        test_case = self
+        def fake_review(items, **kwargs):
+            state = ReviewState(items)
+            kwargs["state_ready"](state)
+            group_id = items[0].identification.group_id
+            for _ in range(100):
+                with state.lock:
+                    images = state.image_data.get(group_id, ())
+                    images_loading = group_id in state.image_loading
+                if len(images) == 2 and not images_loading:
+                    break
+                threading.Event().wait(0.01)
+            else:
+                self.fail("review UI did not receive the full prepared gallery")
 
-        class FakeBrowserReviewSession:
-            def __init__(self, total):
-                self.total = total
-                self.state = SequentialReviewState(total)
-                self.decisions = {}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return None
-
-            def review(self, item, *, index):
-                test_case.assertEqual(len(item.prepared_images), 2)
-                reviewed = PlaceIdentification(
-                    group_id=item.identification.group_id,
-                    country_or_region="Costa Rica",
-                    place_name="Manuel Antonio",
-                    confidence=1.0,
-                    is_unknown=False,
-                    rationale="user",
-                    visual_evidence=(),
-                    alternate_guesses=(),
-                    sampled_paths=(),
-                    raw_response={},
-                )
-                self.decisions[reviewed.group_id] = reviewed
-                return reviewed
-
-            def finalize(self):
-                return SimpleNamespace(decisions=self.decisions)
+            reviewed = PlaceIdentification(
+                group_id=group_id,
+                country_or_region="Costa Rica",
+                place_name="Manuel Antonio",
+                confidence=1.0,
+                is_unknown=False,
+                rationale="user",
+                visual_evidence=(),
+                alternate_guesses=(),
+                sampled_paths=(),
+                raw_response={},
+            )
+            return FinalReviewResult(decisions={reviewed.group_id: reviewed}, image_locations={})
 
         with patch("curator.organize.capture_timestamps", return_value=timestamps):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
-                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                with patch("curator.organize.review_place_identifications_in_browser", fake_review):
                     plan = build_organize_plan(
                         case / "CRG",
                         library,
@@ -508,47 +483,32 @@ class OrganizeTests(unittest.TestCase):
                     prepared_size=(10, 10),
                 )
 
-        test_case = self
-
-        class FakeBrowserReviewSession:
-            def __init__(self, total):
-                self.state = SequentialReviewState(total)
-                self.decisions = {}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                release.set()
-                return None
-
-            def review(self, item, *, index):
-                test_case.assertTrue(started.wait(timeout=1))
-                test_case.assertFalse(returned.is_set())
-                payload = review_item_payload(item, index=index, total=1, llm_data=self.state.llm_data)
-                test_case.assertTrue(payload["llm_loading"])
-                release.set()
-                reviewed = PlaceIdentification(
-                    group_id=item.identification.group_id,
-                    country_or_region="Costa Rica",
-                    place_name="Manuel Antonio",
-                    confidence=1.0,
-                    is_unknown=False,
-                    rationale="user",
-                    visual_evidence=(),
-                    alternate_guesses=(),
-                    sampled_paths=(),
-                    raw_response={},
-                )
-                self.decisions[reviewed.group_id] = reviewed
-                return reviewed
-
-            def finalize(self):
-                return SimpleNamespace(decisions=self.decisions)
+        def fake_review(items, **kwargs):
+            state = ReviewState(items)
+            kwargs["state_ready"](state)
+            self.assertTrue(started.wait(timeout=1))
+            self.assertFalse(returned.is_set())
+            payload = state.payload()
+            self.assertTrue(payload["llm_loading"])
+            release.set()
+            item = items[0]
+            reviewed = PlaceIdentification(
+                group_id=item.identification.group_id,
+                country_or_region="Costa Rica",
+                place_name="Manuel Antonio",
+                confidence=1.0,
+                is_unknown=False,
+                rationale="user",
+                visual_evidence=(),
+                alternate_guesses=(),
+                sampled_paths=(),
+                raw_response={},
+            )
+            return FinalReviewResult(decisions={reviewed.group_id: reviewed}, image_locations={})
 
         with patch("curator.organize.capture_timestamps", return_value={media: timestamp}):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
-                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                with patch("curator.organize.review_place_identifications_in_browser", fake_review):
                     plan = build_organize_plan(
                         case / "CRG",
                         library,
@@ -625,29 +585,15 @@ class OrganizeTests(unittest.TestCase):
                     prepared_size=(10, 10),
                 )
 
-        class FakeBrowserReviewSession:
-            def __init__(self, total):
-                self.total = total
-                self.state = SequentialReviewState(total)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return None
-
-            def review(self, item, *, index):
-                return manuel
-
-            def finalize(self):
-                return SimpleNamespace(
-                    decisions={manuel.group_id: manuel},
-                    image_locations={str(media_a): manuel, str(media_b): corcovado},
-                )
+        def fake_review(items, **kwargs):
+            return FinalReviewResult(
+                decisions={manuel.group_id: manuel},
+                image_locations={str(media_a): manuel, str(media_b): corcovado},
+            )
 
         with patch("curator.organize.capture_timestamps", return_value=timestamps):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
-                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                with patch("curator.organize.review_place_identifications_in_browser", fake_review):
                     plan = build_organize_plan(
                         case / "CRG",
                         library,
@@ -660,8 +606,8 @@ class OrganizeTests(unittest.TestCase):
         parents = {__import__("pathlib").Path(operation.dest).parent.name for operation in plan.operations}
         self.assertEqual(parents, {"Manuel Antonio", "Corcovado"})
 
-    def test_review_ui_context_flows_to_next_model_prompt(self) -> None:
-        case = unique_case_dir("organize-review-ui-context")
+    def test_review_ui_starts_llm_for_all_groups_before_review_returns(self) -> None:
+        case = unique_case_dir("organize-review-ui-prestarts")
         library = case / "library"
         media_a = case / "CRG" / "103NCZ_6" / "DSC_0001.NEF"
         media_b = case / "CRG" / "104NCZ_6" / "DSC_0002.NEF"
@@ -673,14 +619,14 @@ class OrganizeTests(unittest.TestCase):
             media_a: CaptureTimestamp(epoch=1000.0, source="test"),
             media_b: CaptureTimestamp(epoch=2000.0, source="test"),
         }
-        prompts = []
-        second_prompt_seen = threading.Event()
+        groups_started = []
+        all_groups_started = threading.Event()
 
         class FakeIdentifier:
             def identify_prepared_images(self, group_id, prepared_images, prompt=None):
-                prompts.append(prompt or "")
-                if len(prompts) >= 2:
-                    second_prompt_seen.set()
+                groups_started.append(group_id)
+                if len(groups_started) >= 2:
+                    all_groups_started.set()
                 return PlaceIdentification(
                     group_id=group_id,
                     country_or_region="Unsorted",
@@ -705,44 +651,30 @@ class OrganizeTests(unittest.TestCase):
                     prepared_size=(10, 10),
                 )
 
-        class FakeBrowserReviewSession:
-            def __init__(self, total):
-                self.count = 0
-                self.state = SequentialReviewState(total)
-                self.decisions = {}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return None
-
-            def review(self, item, *, index):
-                self.count += 1
-                if self.count == 1:
-                    reviewed = PlaceIdentification(
-                        group_id=item.identification.group_id,
-                        country_or_region="Costa Rica",
-                        place_name="La Fortuna Restaurant",
-                        confidence=1.0,
-                        is_unknown=False,
-                        rationale="user",
-                        visual_evidence=(),
-                        alternate_guesses=(),
-                        sampled_paths=(),
-                        raw_response={},
-                    )
-                else:
-                    reviewed = item.identification
-                self.decisions[reviewed.group_id] = reviewed
-                return reviewed
-
-            def finalize(self):
-                return SimpleNamespace(decisions=self.decisions)
+        def fake_review(items, **kwargs):
+            state = ReviewState(items)
+            kwargs["state_ready"](state)
+            self.assertTrue(all_groups_started.wait(timeout=1))
+            decisions = {
+                item.identification.group_id: PlaceIdentification(
+                    group_id=item.identification.group_id,
+                    country_or_region="Costa Rica",
+                    place_name=f"Reviewed {index}",
+                    confidence=1.0,
+                    is_unknown=False,
+                    rationale="user",
+                    visual_evidence=(),
+                    alternate_guesses=(),
+                    sampled_paths=(),
+                    raw_response={},
+                )
+                for index, item in enumerate(items, start=1)
+            }
+            return FinalReviewResult(decisions=decisions, image_locations={})
 
         with patch("curator.organize.capture_timestamps", return_value=timestamps):
             with patch("curator.organize.ImagePreprocessor", return_value=FakePreprocessor()):
-                with patch("curator.organize.BrowserReviewSession", FakeBrowserReviewSession):
+                with patch("curator.organize.review_place_identifications_in_browser", fake_review):
                     build_organize_plan(
                         case / "CRG",
                         library,
@@ -752,10 +684,7 @@ class OrganizeTests(unittest.TestCase):
                         place_identifier=FakeIdentifier(),
                     )
 
-        self.assertTrue(second_prompt_seen.wait(timeout=1))
-        self.assertEqual(len(prompts), 2)
-        self.assertIn("Costa Rica", prompts[1])
-        self.assertIn("La Fortuna Restaurant", prompts[1])
+        self.assertEqual(set(groups_started), {"103NCZ_6::01", "104NCZ_6::01"})
 
 
 if __name__ == "__main__":
