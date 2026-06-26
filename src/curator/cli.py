@@ -224,14 +224,21 @@ def input_path(prompt: str, *, input_func: Callable[[str], str]) -> str:
 
     old_completer = readline.get_completer()
     old_delims = readline.get_completer_delims()
-    readline.set_completer(path_completer)
-    readline.set_completer_delims(" \t\n")
-    readline.parse_and_bind("tab: complete")
+    configure_path_completion(readline)
     try:
         return input_func(prompt)
     finally:
         readline.set_completer(old_completer)
         readline.set_completer_delims(old_delims)
+
+
+def configure_path_completion(readline_module: object) -> None:
+    readline_module.set_completer(path_completer)
+    readline_module.set_completer_delims("\n")
+    if "libedit" in (getattr(readline_module, "__doc__", "") or "").casefold():
+        readline_module.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline_module.parse_and_bind("tab: complete")
 
 
 def path_completer(text: str, state: int) -> str | None:

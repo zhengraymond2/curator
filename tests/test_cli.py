@@ -7,7 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from curator.cli import GIB, TIB, MountedVolume, VolumeSuggestions, classify_volume_suggestions, cmd_interactive, main
+from curator.cli import (
+    GIB,
+    TIB,
+    MountedVolume,
+    VolumeSuggestions,
+    classify_volume_suggestions,
+    cmd_interactive,
+    configure_path_completion,
+    main,
+    path_completer,
+)
 from curator.metadata import CaptureTimestamp
 from curator.plan import make_plan
 from curator.review_ui import FinalReviewResult
@@ -140,6 +150,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(suggestions.destinations, (destination,))
         self.assertEqual(suggestions.source_hint, source.path)
         self.assertEqual(suggestions.destination_hint, destination.path)
+
+    def test_path_completion_binds_tab_for_libedit(self) -> None:
+        class FakeReadline:
+            __doc__ = "libedit readline compatibility"
+
+            def __init__(self) -> None:
+                self.completer = None
+                self.delims = ""
+                self.bindings: list[str] = []
+
+            def set_completer(self, completer) -> None:
+                self.completer = completer
+
+            def set_completer_delims(self, delims: str) -> None:
+                self.delims = delims
+
+            def parse_and_bind(self, binding: str) -> None:
+                self.bindings.append(binding)
+
+        fake = FakeReadline()
+
+        configure_path_completion(fake)
+
+        self.assertIs(fake.completer, path_completer)
+        self.assertNotIn(" ", fake.delims)
+        self.assertEqual(fake.bindings, ["bind ^I rl_complete"])
+
+    def test_path_completer_keeps_directory_names_with_spaces(self) -> None:
+        case = unique_case_dir("cli-path-complete")
+        folder = case / "LaCie 1"
+        folder.mkdir()
+
+        completion = path_completer(str(case / "La"), 0)
+
+        self.assertEqual(completion, str(folder) + "/")
 
     def test_organize_reports_metadata_progress(self) -> None:
         case = unique_case_dir("cli-metadata-progress")
