@@ -229,7 +229,7 @@ copy workflow.
 
 The interactive flow:
 
-1. Prompts for a command.
+1. Shows a numbered command menu.
 2. Prompts for Source and Destination folders with path autocomplete when the
    terminal supports readline.
 3. Verifies both entered folders exist.

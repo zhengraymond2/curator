@@ -131,6 +131,7 @@ DEST_MAX_BYTES = 16 * TIB
 INTERNAL_VOLUME_NAMES = {"Macintosh HD", "Macintosh HD - Data", "macOS", "MacOS"}
 GREY = "\033[90m"
 RESET = "\033[0m"
+INTERACTIVE_COMMANDS = ("ingestion",)
 
 
 @dataclass(frozen=True)
@@ -164,10 +165,7 @@ def cmd_interactive(
     suggestions = volume_detector() if volume_detector else detect_volume_suggestions()
 
     print("Curator")
-    print("Available commands: ingestion")
-    command = input_func("Command [ingestion]: ").strip() or "ingestion"
-    if command.casefold() != "ingestion":
-        raise ValueError(f"unknown interactive command: {command}")
+    prompt_command_menu(input_func=input_func)
 
     if suggestions.source_hint and suggestions.destination_hint:
         print("Detected one likely source and one likely destination volume.")
@@ -186,6 +184,26 @@ def cmd_interactive(
     destination = create_export_destination(destination_root, now_func())
     print(f"Destination export folder: {destination}")
     return run_review(source, destination)
+
+
+def prompt_command_menu(*, input_func: Callable[[str], str]) -> str:
+    print("Commands:")
+    for index, command in enumerate(INTERACTIVE_COMMANDS, start=1):
+        print(f"  {index}. {command}")
+
+    selected = input_func("Select command [1]: ").strip()
+    if not selected:
+        return INTERACTIVE_COMMANDS[0]
+    if selected.isdigit():
+        index = int(selected)
+        if 1 <= index <= len(INTERACTIVE_COMMANDS):
+            return INTERACTIVE_COMMANDS[index - 1]
+
+    normalized = selected.casefold()
+    for command in INTERACTIVE_COMMANDS:
+        if normalized == command.casefold():
+            return command
+    raise ValueError(f"unknown interactive command: {selected}")
 
 
 def prompt_existing_directory(

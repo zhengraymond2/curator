@@ -108,6 +108,8 @@ class CliTests(unittest.TestCase):
         export = destination_root / "Export 2026-06-25 14:05"
         self.assertEqual(exit_code, 0)
         self.assertTrue(export.is_dir())
+        self.assertIn("Commands:", stdout.getvalue())
+        self.assertIn("1. ingestion", stdout.getvalue())
         self.assertIn("Enter empty to accept detected drives.", stdout.getvalue())
         self.assertIn(str(source), prompts[1])
         self.assertIn(str(destination_root), prompts[2])
@@ -123,7 +125,7 @@ class CliTests(unittest.TestCase):
         source.mkdir(parents=True)
         destination_root.mkdir()
         plan = make_plan(run_id="interactive-test", description="interactive", operations=[], metadata={"kind": "organize"})
-        answers = iter(["ingestion", str(case / "missing"), str(source), str(destination_root)])
+        answers = iter(["1", str(case / "missing"), str(source), str(destination_root)])
 
         with patch("curator.cli.build_organize_plan", return_value=plan):
             with patch("curator.cli.handle_generated_plan", return_value=0):
