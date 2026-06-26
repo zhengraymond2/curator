@@ -98,17 +98,17 @@ returns an unknown location. Close the gallery with Esc, then enter `Country/Pla
 or a place name in the CLI.
 
 Add `--review-ui` to open a local browser review flow for every place-identified
-bundle. Curator starts the model request in the background as soon as the sampled
-images for the current bundle are prepared, then shows the gallery and location
-textbox without waiting for the model result. While the in-memory `llm_data` for
-that bundle is still empty, the model fields show a loading spinner; when the
-result arrives, the UI fills in the model guess, confidence, rationale, and
-evidence. Press Enter or click `Save / Continue` to advance. The location
-textbox accepts `Country/Place` or a place name, and suggests previously entered
-places with case-insensitive fuzzy matching; selecting an existing place reuses
-the same destination folder.
-Each reviewed location becomes context for the next model prompt, with the most
-recent country/region treated as the active trip context.
+bundle. Curator opens the UI with lightweight pending review items, then prepares
+sampled images for every bundle in the background and starts those LLM requests
+as soon as each bundle's samples are ready. While the in-memory `llm_data` for a
+bundle is still empty, the model fields show a loading spinner; when the result
+arrives, the UI fills in the model guess, confidence, rationale, and evidence.
+Image data is served through separate `/api/image` requests so `/api/state`
+polling stays small while LLM or gallery work is still pending. Press Enter or
+click `Save / Continue` to advance even if the model or full gallery is still
+loading. The location textbox accepts `Country/Place` or a place name, and
+suggests previously entered places with case-insensitive fuzzy matching;
+selecting an existing place reuses the same destination folder.
 
 The prompt is checked in at `src/curator/prompts/prompt_001_identify_place.txt` and tells
 the model to use an `unknown XYZ` fallback when the location evidence is weak.

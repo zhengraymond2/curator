@@ -227,12 +227,12 @@ Important options:
 
 `--review-unknown-places` makes unknown model results interactive: Curator opens the sampled images in a macOS Quick Look gallery, the user closes it with Esc, and then enters a corrected location in the CLI.
 
-`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. For each bundle, Curator prepares the sampled images, starts the LLM request in the background, and immediately lets the UI show the location textbox and all prepared images. While that bundle has no in-memory `llm_data`, the model fields show a loading spinner; when `llm_data` arrives, the page shows the model guess, confidence, rationale, and visible evidence. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle even if the model result is still pending. When all bundles are reviewed, Curator writes the requested dry-run file.
+`--review-ui` opens a local browser page that reviews every place-identified bundle sequentially. Curator gives the UI a lightweight pending item for each bundle up front, then a background worker prepares sampled images for every bundle and starts each LLM request as soon as those samples are ready. Full gallery preparation runs after the sampled-image pass. While a bundle has no in-memory `llm_data`, the model fields show a loading spinner; while images are pending, the gallery shows a loading spinner and then fills in as image data is prepared. Browser state polling stays small because images are served separately through `/api/image` instead of being embedded as base64 in every `/api/state` response. The location textbox accepts `Country/Place` or a place name. Pressing Enter or clicking `Save / Continue` saves a location and advances to the next bundle even if the model result or full gallery is still pending. When all bundles are reviewed, Curator writes the requested dry-run file.
 
 The review UI keeps a list of previously entered places and uses it in two ways:
 
 - The place field offers case-insensitive fuzzy suggestions. Selecting or exactly retyping an existing place reuses the same destination folder.
-- Each reviewed location is appended to the context for later model prompts. The most recent country/region is treated as the active context, so a user-entered country switch such as `Guatemala` makes later prompts prefer Guatemala context rather than older Costa Rica context.
+- Each reviewed location is appended to the UI context shown for later bundles. The most recent country/region is treated as the active context for suggestions, so a user-entered country switch such as `Guatemala` makes later suggestions prefer Guatemala context rather than older Costa Rica context.
 
 Example `DRYRUN.txt`:
 

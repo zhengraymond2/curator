@@ -73,6 +73,36 @@ class ReviewUiTests(unittest.TestCase):
         self.assertFalse(loaded["llm_loading"])
         self.assertEqual(loaded["place_name"], "unknown beach")
 
+    def test_pending_review_item_payload_uses_image_data_when_available(self) -> None:
+        item = ReviewItem(sample_identification(), (), file_count=42, images_pending=True)
+
+        loading = review_item_payload(item, index=0, total=3)
+        loaded = review_item_payload(
+            item,
+            index=0,
+            total=3,
+            image_data={"103NCZ_6::01": (sample_image(),)},
+            image_loading=set(),
+            image_versions={"103NCZ_6::01": 1},
+            image_url_builder=lambda group_id, index, version: f"/image/{group_id}/{index}/{version}",
+        )
+
+        self.assertTrue(loading["images_loading"])
+        self.assertEqual(loading["images"], [])
+        self.assertFalse(loaded["images_loading"])
+        self.assertEqual(loaded["images"][0]["src"], "/image/103NCZ_6::01/0/1")
+
+    def test_review_state_serves_prepared_image_bytes(self) -> None:
+        state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
+
+        response = state.image_response("103NCZ_6::01", 0)
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        body, content_type = response
+        self.assertEqual(body, b"jpeg")
+        self.assertEqual(content_type, "image/jpeg")
+
     def test_review_state_records_decision_and_advances(self) -> None:
         state = ReviewState([ReviewItem(sample_identification(), (sample_image(),), file_count=1)])
 
