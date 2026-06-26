@@ -86,6 +86,39 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Wrote dry-run hierarchy:", stdout.getvalue())
         self.assertIn("No copy/move operations were applied.", stdout.getvalue())
 
+    def test_organize_reports_metadata_progress(self) -> None:
+        case = unique_case_dir("cli-metadata-progress")
+        source = case / "originalFolder" / "DCIM"
+        library = case / "library"
+        media = source / "DSC_0001.JPG"
+        media.parent.mkdir(parents=True)
+        media.write_bytes(b"fake jpg")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch("curator.metadata.exiftool_capture_dates", return_value=[]):
+            with patch("curator.metadata.sips_creation_dates", return_value={}):
+                with patch("curator.metadata.mdls_content_creation_dates", return_value={}):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        exit_code = main(
+                            [
+                                "organize",
+                                "--mode",
+                                "migration",
+                                "--transfer",
+                                "copy",
+                                "--source",
+                                str(case / "originalFolder"),
+                                "--library",
+                                str(library),
+                                "--dry-mode",
+                            ]
+                        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("[curator] Starting: Processing metadata... (0/1 files processed)", stderr.getvalue())
+        self.assertIn("[curator] Done: Processing metadata... (1/1 files processed)", stderr.getvalue())
+
     def test_organize_dry_mode_reports_debug_stdout_with_debug_environment(self) -> None:
         case = unique_case_dir("cli-progress-debug")
         source = case / "originalFolder" / "DCIM"
