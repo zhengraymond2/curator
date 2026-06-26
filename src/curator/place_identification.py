@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - exercised only without installed deps
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini"
 DEFAULT_PROMPT_NAME = "prompt_001_identify_place.txt"
-DEFAULT_COUNTRY_PROMPT_NAME = "prompt_002_identify_country_for_album.txt"
+DEFAULT_BATCH_COUNTRY_PROMPT_NAME = "prompt_003_identify_countries_for_albums.txt"
 DEFAULT_MAX_IMAGE_SIDE = 1536
 DEFAULT_JPEG_QUALITY = 82
 DEFAULT_ENV_FILE_NAME = ".env"
@@ -97,6 +97,42 @@ PLACE_RESPONSE_SCHEMA: Mapping[str, Any] = {
     },
 }
 
+BATCH_COUNTRY_RESPONSE_SCHEMA: Mapping[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "album_country_identification",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "albums": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "group_id": {"type": "string"},
+                            "album_name": {"type": "string"},
+                            "country_or_region": {"type": "string"},
+                            "confidence": {"type": "number"},
+                            "rationale": {"type": "string"},
+                        },
+                        "required": [
+                            "group_id",
+                            "album_name",
+                            "country_or_region",
+                            "confidence",
+                            "rationale",
+                        ],
+                    },
+                }
+            },
+            "required": ["albums"],
+        },
+    },
+}
+
 
 class PlaceIdentificationError(RuntimeError):
     """Base error for place identification failures."""
@@ -144,11 +180,28 @@ class PlaceIdentification:
     raw_response: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class AlbumCountryContext:
+    group_id: str
+    album_name: str
+    llm_response: PlaceIdentification
+
+
+@dataclass(frozen=True)
+class AlbumCountryGuess:
+    group_id: str
+    album_name: str
+    country_or_region: str
+    confidence: float
+    rationale: str
+    raw_response: Mapping[str, Any]
+
+
 def load_place_identification_prompt(prompt_name: str = DEFAULT_PROMPT_NAME) -> str:
     return resources.files("curator").joinpath("prompts", prompt_name).read_text(encoding="utf-8")
 
 
-def load_country_identification_prompt(prompt_name: str = DEFAULT_COUNTRY_PROMPT_NAME) -> str:
+def load_batch_country_identification_prompt(prompt_name: str = DEFAULT_BATCH_COUNTRY_PROMPT_NAME) -> str:
     return resources.files("curator").joinpath("prompts", prompt_name).read_text(encoding="utf-8")
 
 
@@ -409,28 +462,71 @@ class OpenRouterPlaceIdentifier:
             raw_response=response,
         )
 
-    def identify_country_for_album(
+    def identify_countries_for_albums(
         self,
-        group_id: str,
-        album_name: str,
-        prepared_images: Sequence[PreparedImage],
+        contexts: Sequence[AlbumCountryContext],
         prompt: str | None = None,
-    ) -> PlaceIdentification:
-        prompt_text = prompt or load_country_identification_prompt()
-        prompt_text = f"{prompt_text}\n\nAlbum name selected by the user: {album_name}"
-        identification = self.identify_prepared_images(group_id, prepared_images, prompt=prompt_text)
-        return PlaceIdentification(
-            group_id=identification.group_id,
-            country_or_region=identification.country_or_region,
-            place_name=album_name,
-            confidence=identification.confidence,
-            is_unknown=identification.is_unknown,
-            rationale=identification.rationale,
-            visual_evidence=identification.visual_evidence,
-            alternate_guesses=identification.alternate_guesses,
-            sampled_paths=identification.sampled_paths,
-            raw_response=identification.raw_response,
+    ) -> tuple[AlbumCountryGuess, ...]:
+        if not contexts:
+            return ()
+
+        payload = self._build_batch_country_payload(
+            contexts,
+            prompt or load_batch_country_identification_prompt(),
         )
+        response = self._post(payload)
+        content = self._extract_message_content(response)
+        parsed = self._parse_batch_country_content(content)
+        guesses = []
+        for item in parsed["albums"]:
+            guesses.append(
+                AlbumCountryGuess(
+                    group_id=str(item["group_id"]),
+                    album_name=str(item["album_name"]),
+                    country_or_region=str(item["country_or_region"]),
+                    confidence=float(item["confidence"]),
+                    rationale=str(item["rationale"]),
+                    raw_response=response,
+                )
+            )
+        return tuple(guesses)
+
+    def _build_batch_country_payload(
+        self,
+        contexts: Sequence[AlbumCountryContext],
+        prompt_text: str,
+    ) -> Mapping[str, Any]:
+        albums = []
+        for context in contexts:
+            response = context.llm_response
+            albums.append(
+                {
+                    "group_id": context.group_id,
+                    "album_name": context.album_name,
+                    "llm_response": {
+                        "country_or_region": response.country_or_region,
+                        "place_name": response.place_name,
+                        "confidence": response.confidence,
+                        "is_unknown": response.is_unknown,
+                        "rationale": response.rationale,
+                        "visual_evidence": list(response.visual_evidence),
+                        "alternate_guesses": list(response.alternate_guesses),
+                        "sampled_files": [path.name for path in response.sampled_paths],
+                    },
+                }
+            )
+        content: list[Mapping[str, Any]] = [
+            {"type": "text", "text": prompt_text},
+            {"type": "text", "text": json.dumps({"albums": albums}, indent=2)},
+        ]
+
+        return {
+            "model": self.model,
+            "messages": [{"role": "user", "content": content}],
+            "response_format": BATCH_COUNTRY_RESPONSE_SCHEMA,
+            "temperature": 0.1,
+            "max_tokens": max(400, min(4000, 160 * len(contexts))),
+        }
 
     def _build_payload(
         self,
@@ -532,6 +628,25 @@ class OpenRouterPlaceIdentifier:
         missing = required.difference(parsed)
         if missing:
             raise OpenRouterError(f"Model response missing keys: {sorted(missing)}")
+        return parsed
+
+    @staticmethod
+    def _parse_batch_country_content(content: str) -> Mapping[str, Any]:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise OpenRouterError(f"Model returned non-JSON content: {content}") from exc
+
+        albums = parsed.get("albums") if isinstance(parsed, Mapping) else None
+        if not isinstance(albums, list):
+            raise OpenRouterError("Model response missing albums array.")
+        required = {"group_id", "album_name", "country_or_region", "confidence", "rationale"}
+        for index, item in enumerate(albums):
+            if not isinstance(item, Mapping):
+                raise OpenRouterError(f"Model response album {index} was not an object.")
+            missing = required.difference(item)
+            if missing:
+                raise OpenRouterError(f"Model response album {index} missing keys: {sorted(missing)}")
         return parsed
 
 

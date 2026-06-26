@@ -1,0 +1,32 @@
+I provide a list of named photo albums with context. Guess the country or region for each album.
+
+The provided context for each album includes:
+1. The album name assigned by the user.
+2. The response from an earlier LLM that tried to guess the location from sampled images before the album was named.
+3. The order of the albums as reviewed by the user.
+
+Albums usually do not alternate countries. For example, the country sequence could plausibly be Italy, Italy, Italy, France, France, United States, Canada. It is less likely to be Italy, Italy, France, Italy, France, Canada, Italy. Use this constraint to improve accuracy, while still allowing a new country when the album name and context justify it.
+
+Use the album name and the earlier LLM response together. The earlier LLM may be uncertain or wrong, especially when it returned Unsorted or unknown. Do not invent certainty.
+
+Input is JSON:
+{
+  "albums": [
+    {
+      "group_id": "...",
+      "album_name": "...",
+      "llm_response": {
+        "country_or_region": "...",
+        "place_name": "...",
+        "confidence": 0.0,
+        "is_unknown": false,
+        "rationale": "...",
+        "visual_evidence": ["..."],
+        "alternate_guesses": ["..."],
+        "sampled_files": ["..."]
+      }
+    }
+  ]
+}
+
+Return only JSON matching the requested schema. Preserve each group_id and album_name exactly. Use "Unsorted" only when there is not enough evidence for a country or useful region.

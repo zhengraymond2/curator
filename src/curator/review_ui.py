@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from .place_identification import PlaceIdentification, PreparedImage
+from .place_identification import AlbumCountryContext, AlbumCountryGuess, PlaceIdentification, PreparedImage
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class ReviewItem:
 
 
 ImageUrlBuilder = Callable[[str, int, int], str]
-CountryGuessStarter = Callable[[str, str, tuple[PreparedImage, ...]], None]
+CountryBatchGuessStarter = Callable[[tuple[AlbumCountryContext, ...]], None]
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ class ReviewState:
         items: Sequence[ReviewItem],
         *,
         wait_for_final_validation: bool = False,
-        country_guess_starter: CountryGuessStarter | None = None,
+        country_batch_guess_starter: CountryBatchGuessStarter | None = None,
     ) -> None:
         self.items = list(items)
         self.items_by_group_id = {item.identification.group_id: item for item in self.items}
@@ -75,8 +75,8 @@ class ReviewState:
         self.decisions: dict[str, PlaceIdentification] = {}
         self.llm_data: dict[str, PlaceIdentification] = {}
         self.llm_errors: dict[str, str] = {}
+        self.country_context_data: dict[str, PlaceIdentification] = {}
         self.image_data: dict[str, tuple[PreparedImage, ...]] = {}
-        self.model_image_data: dict[str, tuple[PreparedImage, ...]] = {}
         self.image_errors: dict[str, str] = {}
         self.image_loading: set[str] = {
             item.identification.group_id for item in self.items if item.images_pending
@@ -85,8 +85,10 @@ class ReviewState:
         self.accepted_suggestions: list[LocationSuggestion] = []
         self.reviewed: list[ReviewedAlbum] = []
         self.image_locations: dict[str, PlaceIdentification] = {}
-        self.country_guess_starter = country_guess_starter
+        self.country_batch_guess_starter = country_batch_guess_starter
         self.country_guess_loading: set[str] = set()
+        self.country_guess_pending: set[str] = set()
+        self.country_batch_started = False
         self.country_locked: set[str] = set()
         self.final_ready = False
         self.final_validation_status: str | None = None
@@ -102,6 +104,7 @@ class ReviewState:
         self.lock = threading.Lock()
 
     def payload(self, image_url_builder: ImageUrlBuilder | None = None) -> Mapping[str, object]:
+        batch_request: tuple[AlbumCountryContext, ...] = ()
         with self.lock:
             if self.final_validation_status is not None:
                 payload = final_validation_payload(
@@ -119,7 +122,8 @@ class ReviewState:
                     self.final_validation_seen.set()
                 return payload
             if self.final_ready:
-                return final_review_payload(
+                batch_request = self.country_batch_request_locked()
+                payload = final_review_payload(
                     self.reviewed,
                     self.image_locations,
                     self.index,
@@ -129,21 +133,24 @@ class ReviewState:
                     images_loading=self.image_loading,
                     country_guesses_loading=self.country_guess_loading,
                 )
-            if self.index >= len(self.items):
-                return {"done": True, "index": self.index, "total": len(self.items)}
-            item = self.item_with_current_context(self.items[self.index])
-            return review_item_payload(
-                item,
-                self.index,
-                len(self.items),
-                llm_data=self.llm_data,
-                llm_errors=self.llm_errors,
-                image_data=self.image_data,
-                image_errors=self.image_errors,
-                image_loading=self.image_loading,
-                image_versions=self.image_versions,
-                image_url_builder=image_url_builder,
-            )
+            else:
+                if self.index >= len(self.items):
+                    return {"done": True, "index": self.index, "total": len(self.items)}
+                item = self.item_with_current_context(self.items[self.index])
+                return review_item_payload(
+                    item,
+                    self.index,
+                    len(self.items),
+                    llm_data=self.llm_data,
+                    llm_errors=self.llm_errors,
+                    image_data=self.image_data,
+                    image_errors=self.image_errors,
+                    image_loading=self.image_loading,
+                    image_versions=self.image_versions,
+                    image_url_builder=image_url_builder,
+                )
+        start_batch_country_guess(self.country_batch_guess_starter, batch_request)
+        return payload
 
     def decide(
         self,
@@ -151,7 +158,7 @@ class ReviewState:
         place_name: str | None,
         image_url_builder: ImageUrlBuilder | None = None,
     ) -> Mapping[str, object]:
-        country_guess_request: tuple[str, str, tuple[PreparedImage, ...]] | None = None
+        batch_request: tuple[AlbumCountryContext, ...] = ()
         with self.lock:
             if self.index >= len(self.items):
                 self.done.set()
@@ -159,6 +166,7 @@ class ReviewState:
 
             item = self.item_with_current_context(self.items[self.index])
             original = self.llm_data.get(item.identification.group_id, item.identification)
+            self.country_context_data[original.group_id] = original
             country_was_explicit = country_supplied_by_user(country_or_region, place_name)
             suggestions = [*item.suggestions, *self.accepted_suggestions]
             country, place = resolve_location(
@@ -178,20 +186,18 @@ class ReviewState:
             self.decisions[original.group_id] = reviewed
             if country_was_explicit:
                 self.country_locked.add(original.group_id)
-            elif self.country_guess_starter and place:
+                self.country_guess_pending.discard(original.group_id)
+                self.country_guess_loading.discard(original.group_id)
+            elif self.country_batch_guess_starter and place:
                 self.country_locked.discard(original.group_id)
-                self.country_guess_loading.add(original.group_id)
-                country_guess_request = (
-                    original.group_id,
-                    place,
-                    self.model_images_for_group(original.group_id, item),
-                )
+                self.country_guess_pending.add(original.group_id)
             self.reviewed.append(ReviewedAlbum(item=item, decision=reviewed))
             set_initial_image_locations(self.image_locations, item, reviewed)
             add_location_suggestion(self.accepted_suggestions, reviewed)
             self.index += 1
             if self.index >= len(self.items):
                 self.final_ready = True
+                batch_request = self.country_batch_request_locked()
                 payload = final_review_payload(
                     self.reviewed,
                     self.image_locations,
@@ -216,18 +222,26 @@ class ReviewState:
                     image_versions=self.image_versions,
                     image_url_builder=image_url_builder,
                 )
-        if country_guess_request:
-            self.country_guess_starter(*country_guess_request)
+        start_batch_country_guess(self.country_batch_guess_starter, batch_request)
         return payload
 
     def store_llm_result(self, identification: PlaceIdentification) -> None:
+        batch_request: tuple[AlbumCountryContext, ...] = ()
         with self.lock:
             self.llm_data[identification.group_id] = identification
+            self.country_context_data[identification.group_id] = identification
             self.llm_errors.pop(identification.group_id, None)
+            if self.final_ready:
+                batch_request = self.country_batch_request_locked()
+        start_batch_country_guess(self.country_batch_guess_starter, batch_request)
 
     def store_llm_error(self, group_id: str, error: Exception) -> None:
+        batch_request: tuple[AlbumCountryContext, ...] = ()
         with self.lock:
             self.llm_errors[group_id] = str(error)
+            if self.final_ready:
+                batch_request = self.country_batch_request_locked()
+        start_batch_country_guess(self.country_batch_guess_starter, batch_request)
 
     def store_images(
         self,
@@ -247,48 +261,94 @@ class ReviewState:
             self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
             self.refresh_reviewed_images(group_id, prepared)
 
-    def store_model_images(self, group_id: str, images: Sequence[PreparedImage]) -> None:
-        with self.lock:
-            self.model_image_data[group_id] = tuple(images)
-
     def store_image_error(self, group_id: str, error: Exception) -> None:
         with self.lock:
             self.image_errors[group_id] = str(error)
             self.image_loading.discard(group_id)
             self.image_versions[group_id] = self.image_versions.get(group_id, 0) + 1
 
-    def store_country_guess(self, group_id: str, album_name: str, identification: PlaceIdentification) -> None:
-        with self.lock:
-            self.country_guess_loading.discard(group_id)
-            if group_id in self.country_locked:
-                return
-            for index, reviewed_album in enumerate(self.reviewed):
-                decision = reviewed_album.decision
-                if decision.group_id != group_id or normalize_text(decision.place_name) != normalize_text(album_name):
-                    continue
-                updated = updated_final_decision(
-                    decision,
-                    identification.country_or_region,
-                    decision.place_name,
-                    rationale_prefix="LLM guessed country after album naming",
-                    confidence=identification.confidence,
-                )
-                self.reviewed[index] = ReviewedAlbum(item=reviewed_album.item, decision=updated)
-                for path, image_decision in list(self.image_locations.items()):
-                    if image_decision.group_id == group_id and normalize_text(image_decision.place_name) == normalize_text(album_name):
-                        self.image_locations[path] = updated_final_decision(
-                            image_decision,
-                            identification.country_or_region,
-                            image_decision.place_name,
-                            rationale_prefix="LLM guessed country after album naming",
-                            confidence=identification.confidence,
-                        )
-                self.decisions = reviewed_decisions(self.reviewed)
-                return
+    def country_batch_request_locked(self) -> tuple[AlbumCountryContext, ...]:
+        if self.country_batch_started or not self.country_batch_guess_starter:
+            return ()
+        group_ids = [
+            album.decision.group_id
+            for album in self.reviewed
+            if album.decision.group_id in self.country_guess_pending and album.decision.group_id not in self.country_locked
+        ]
+        if not group_ids:
+            self.country_guess_loading.clear()
+            return ()
 
-    def store_country_guess_error(self, group_id: str, error: Exception) -> None:
+        self.country_guess_loading = set(group_ids)
+        waiting = [
+            group_id
+            for group_id in group_ids
+            if self.items_by_group_id.get(group_id, None) is not None
+            and self.items_by_group_id[group_id].llm_pending
+            and group_id not in self.llm_data
+            and group_id not in self.llm_errors
+        ]
+        if waiting:
+            return ()
+
+        contexts = []
+        for album in self.reviewed:
+            group_id = album.decision.group_id
+            if group_id not in group_ids:
+                continue
+            context = self.llm_data.get(group_id) or self.country_context_data.get(group_id) or album.decision
+            contexts.append(
+                AlbumCountryContext(
+                    group_id=group_id,
+                    album_name=album.decision.place_name,
+                    llm_response=context,
+                )
+            )
+        self.country_batch_started = True
+        return tuple(contexts)
+
+    def store_country_batch_guesses(self, guesses: Sequence[AlbumCountryGuess]) -> None:
+        guesses_by_group = {guess.group_id: guess for guess in guesses}
         with self.lock:
-            self.country_guess_loading.discard(group_id)
+            for group_id in list(self.country_guess_loading):
+                guess = guesses_by_group.get(group_id)
+                if guess is None:
+                    self.country_guess_loading.discard(group_id)
+                    self.country_guess_pending.discard(group_id)
+                    continue
+                if group_id in self.country_locked:
+                    self.country_guess_loading.discard(group_id)
+                    self.country_guess_pending.discard(group_id)
+                    continue
+                for index, reviewed_album in enumerate(self.reviewed):
+                    decision = reviewed_album.decision
+                    if decision.group_id != group_id or normalize_text(decision.place_name) != normalize_text(guess.album_name):
+                        continue
+                    updated = updated_final_decision(
+                        decision,
+                        guess.country_or_region,
+                        decision.place_name,
+                        rationale_prefix="LLM guessed country after batch album review",
+                        confidence=guess.confidence,
+                    )
+                    self.reviewed[index] = ReviewedAlbum(item=reviewed_album.item, decision=updated)
+                    for path, image_decision in list(self.image_locations.items()):
+                        if image_decision.group_id == group_id and normalize_text(image_decision.place_name) == normalize_text(guess.album_name):
+                            self.image_locations[path] = updated_final_decision(
+                                image_decision,
+                                guess.country_or_region,
+                                image_decision.place_name,
+                                rationale_prefix="LLM guessed country after batch album review",
+                                confidence=guess.confidence,
+                            )
+                    self.country_guess_loading.discard(group_id)
+                    self.country_guess_pending.discard(group_id)
+                    break
+            self.decisions = reviewed_decisions(self.reviewed)
+
+    def store_country_batch_error(self, error: Exception) -> None:
+        with self.lock:
+            self.country_guess_loading.clear()
 
     def image_url(self, group_id: str, index: int, version: int) -> str:
         return f"/api/image?{urlencode({'group_id': group_id, 'index': index, 'v': version})}"
@@ -305,9 +365,6 @@ class ReviewState:
             return self.image_data[group_id]
         item = self.items_by_group_id.get(group_id)
         return item.prepared_images if item else ()
-
-    def model_images_for_group(self, group_id: str, item: ReviewItem) -> tuple[PreparedImage, ...]:
-        return self.model_image_data.get(group_id) or item.prepared_images
 
     def item_with_current_context(self, item: ReviewItem) -> ReviewItem:
         group_id = item.identification.group_id
@@ -1043,6 +1100,14 @@ def final_validation_payload(
 
 def reviewed_decisions(reviewed: Sequence[ReviewedAlbum]) -> dict[str, PlaceIdentification]:
     return {album.decision.group_id: album.decision for album in reviewed}
+
+
+def start_batch_country_guess(
+    starter: CountryBatchGuessStarter | None,
+    contexts: tuple[AlbumCountryContext, ...],
+) -> None:
+    if starter and contexts:
+        starter(contexts)
 
 
 def lock_country_for_album(
