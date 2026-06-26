@@ -138,6 +138,47 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_organize_apply_runs_final_integrity_verification(self) -> None:
+        case = unique_case_dir("cli-organize-apply-verify")
+        source = case / "originalFolder" / "DCIM"
+        library = case / "library"
+        plan = case / "plan.json"
+        media = source / "DSC_0001.NEF"
+        media.parent.mkdir(parents=True)
+        media.write_bytes(b"fake raw")
+
+        timestamp = CaptureTimestamp(
+            epoch=1_779_606_716.0,
+            source="exiftool:DateTimeOriginal",
+            raw="2026:05:24 03:31:56",
+        )
+        stdout = io.StringIO()
+        with patch("curator.organize.capture_timestamps", return_value={media.resolve(): timestamp}):
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main(
+                    [
+                        "organize",
+                        "--mode",
+                        "migration",
+                        "--transfer",
+                        "copy",
+                        "--source",
+                        str(case / "originalFolder"),
+                        "--library",
+                        str(library),
+                        "--plan",
+                        str(plan),
+                        "--apply",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((library / "Originals" / "Unsorted" / "DCIM" / "DSC_0001.NEF").exists())
+        self.assertIn("Final integrity verification: PASSED", stdout.getvalue())
+        self.assertIn("Checksum comparison: PASSED", stdout.getvalue())
+        self.assertIn("Filesum comparison: PASSED", stdout.getvalue())
+        self.assertIn("Filename set comparison: PASSED", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ from .organize import build_organize_plan
 from .plan import Plan, read_plan, write_plan
 from .progress import ProgressReporter
 from .safety import SafetyError, apply_plan
+from .verification import format_large_red_error, format_verification_summary, verify_organize_copy_plan
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,6 +184,12 @@ def handle_generated_plan(
 
     results = apply_plan(plan, log_root=default_log_root, progress=progress)
     print(f"Applied {len(results)} operation(s).")
+    if plan.metadata.get("kind") == "organize" and plan.metadata.get("transfer") == "copy":
+        report = verify_organize_copy_plan(plan, progress=progress)
+        if not report.success:
+            print(format_large_red_error(report), file=sys.stderr)
+            return 3
+        print(format_verification_summary(report))
     if plan.metadata.get("kind") == "ingest":
         print("Checksum verification: PASSED")
         print(f"Files copied: {plan.metadata.get('file_count', 0)}")

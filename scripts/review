@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/review SOURCE_DIR [extra curator organize args...]
+
+Runs Curator's reviewed organizer against SOURCE_DIR and applies the copy plan.
+At the end, Curator verifies source/final checksums, file totals, and filename sets.
+
+Defaults:
+  library root: test/review-library
+  plan file:    LIBRARY_ROOT/.curator/plans/review-TIMESTAMP.json
+
+Environment overrides:
+  LIBRARY_ROOT=/path/to/library
+  PLAN_FILE=/path/to/plan.json
+  PYTHON_BIN=/path/to/python3
+
+Examples:
+  ./scripts/review "/Volumes/LaCie 1/CRG"
+  LIBRARY_ROOT=/path/to/library ./scripts/review "/Volumes/LaCie 1/CRG"
+EOF
+}
+
+die() {
+  echo "$1" >&2
+  exit "${2:-1}"
+}
+
+red_error() {
+  printf '\033[1;31m%s\033[0m\n' "$1" >&2
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 64
+fi
+
+SOURCE_DIR="$1"
+shift
+
+if [[ ! -d "$SOURCE_DIR" ]]; then
+  die "Source directory does not exist: $SOURCE_DIR" 66
+fi
+SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-mode|--dry-mode=*|--dry-run-file|--dry-run-file=*|--transfer|--transfer=*|--apply)
+      die "./scripts/review always runs a real reviewed copy. Do not pass $arg." 64
+      ;;
+  esac
+done
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_PYTHON="$ROOT_DIR/.venv/bin/python"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+if [[ -z "$PYTHON_BIN" && -x "$DEFAULT_PYTHON" ]]; then
+  PYTHON_BIN="$DEFAULT_PYTHON"
+fi
+
+if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    die "Could not find python3. Set PYTHON_BIN=/path/to/python3 and try again." 69
+  fi
+fi
+
+LIBRARY_ROOT="${LIBRARY_ROOT:-$ROOT_DIR/test/review-library}"
+PLAN_STAMP="$(date +%Y-%m-%dT%H-%M-%S)"
+PLAN_FILE="${PLAN_FILE:-$LIBRARY_ROOT/.curator/plans/review-$PLAN_STAMP.json}"
+LOCK_FILE="$SOURCE_DIR/.lock"
+LOCK_MODE="advisory"
+
+on_error() {
+  red_error "Curator review copy did not complete cleanly. DO NOT DELETE THE ORIGINAL SOURCE FOLDER."
+  echo "Source deletion lock remains: $LOCK_FILE" >&2
+}
+trap on_error ERR
+
+create_source_lock() {
+  if [[ ! -e "$LOCK_FILE" ]]; then
+    {
+      printf 'Curator source deletion lock\n'
+      printf '\n'
+      printf 'This file was created before a non-dry-run Curator review copy.\n'
+      printf 'It is intentionally easy to remove, but it should make accidental deletion harder.\n'
+      printf '\n'
+      printf 'Remove only after Curator reports final integrity verification: PASSED.\n'
+      printf '\n'
+      printf 'To remove on macOS:\n'
+      printf '  chflags nouchg "%s" 2>/dev/null || true\n' "$LOCK_FILE"
+      printf '  rm "%s"\n' "$LOCK_FILE"
+    } >"$LOCK_FILE" || die "Could not create source deletion lock: $LOCK_FILE" 73
+    chmod 444 "$LOCK_FILE" 2>/dev/null || true
+  fi
+
+  if command -v chflags >/dev/null 2>&1; then
+    if chflags uchg "$LOCK_FILE" 2>/dev/null; then
+      LOCK_MODE="macOS immutable"
+    fi
+  fi
+}
+
+create_source_lock
+
+echo "Curator reviewed copy"
+echo "  source:        $SOURCE_DIR"
+echo "  library root:  $LIBRARY_ROOT"
+echo "  plan file:     $PLAN_FILE"
+echo "  source lock:   $LOCK_FILE ($LOCK_MODE)"
+if [[ "$LOCK_MODE" == "advisory" ]]; then
+  echo "  lock warning:  immutable flag unavailable; .lock is advisory only" >&2
+fi
+
+cd "$ROOT_DIR"
+"$PYTHON_BIN" -m curator organize \
+  --mode migration \
+  --source "$SOURCE_DIR" \
+  --library "$LIBRARY_ROOT" \
+  --review-ui \
+  --plan "$PLAN_FILE" \
+  "$@" \
+  --transfer copy \
+  --apply
+
+trap - ERR
+echo
+echo "Source folder remains protected by: $LOCK_FILE"
+echo "After you have separately confirmed the copy and backups, remove it with:"
+echo "  chflags nouchg \"$LOCK_FILE\" 2>/dev/null || true"
+echo "  rm \"$LOCK_FILE\""
